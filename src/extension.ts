@@ -7,14 +7,11 @@ import { RelationController } from './features/relation/RelationController';
 import { RelationWebviewProvider } from './features/relation/RelationWebviewProvider';
 import { ReferenceController } from './features/reference/ReferenceController';
 import { ReferenceWebviewProvider } from './features/reference/ReferenceWebview';
-import { LspClient } from './shared/services/LspClient';
-import { DatabaseManager } from './shared/services/DatabaseManager';
 import { DisabledWebviewProvider } from './features/placeholder/DisabledWebviewProvider';
 import { GlobalStatusBar } from './shared/ui/GlobalStatusBar';
+import { CodeGraphService } from './shared/services/CodeGraphService';
 import * as fs from 'fs';
 import { rgPath } from '@vscode/ripgrep';
-
-let globalDbManager: DatabaseManager | undefined;
 
 function ensureRipgrepPermissions() {
     if (process.platform !== 'win32') {
@@ -33,36 +30,13 @@ function ensureRipgrepPermissions() {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-	console.log('[Source Window] Symbol & Relation Window is active!');
+	console.log('[CodeGraph Relation] Extension is active.');
 
     // Ensure ripgrep has executable permissions on Linux/macOS
     ensureRipgrepPermissions();
 
-    const lspClient = new LspClient();
-    let dbManager: DatabaseManager | undefined;
-
-    // Initialize Global Status Bar
-    const globalStatusBar = new GlobalStatusBar(context, lspClient, undefined);
-
-    const updateDatabaseManager = () => {
-        const symbolEnabled = vscode.workspace.getConfiguration('symbolWindow').get<boolean>('enable', true);
-        const relationEnabled = vscode.workspace.getConfiguration('relationWindow').get<boolean>('enable', true);
-        
-        if (symbolEnabled || relationEnabled) {
-            if (!dbManager) {
-                dbManager = new DatabaseManager(context);
-                globalDbManager = dbManager;
-                globalStatusBar.setDatabaseManager(dbManager);
-            }
-        } else {
-            if (dbManager) {
-                dbManager.dispose();
-                dbManager = undefined;
-                globalDbManager = undefined;
-                globalStatusBar.setDatabaseManager(undefined);
-            }
-        }
-    };
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const codeGraph = new CodeGraphService(workspaceRoot || context.extensionPath);
 
     // Symbol Window Logic
     let controller: SymbolController | undefined;
@@ -85,6 +59,15 @@ export function activate(context: vscode.ExtensionContext) {
     let referenceController: ReferenceController | undefined;
     let referenceViewDisposable: vscode.Disposable | undefined;
 
+    const refreshCodeGraphViews = async () => {
+        await controller?.refresh();
+        await projectController?.refresh();
+        await relationController?.refresh();
+    };
+
+    // Initialize Global Status Bar
+    const globalStatusBar = new GlobalStatusBar(context, codeGraph, refreshCodeGraphViews);
+
     const initSymbolWindow = () => {
         const config = vscode.workspace.getConfiguration('symbolWindow');
         const enabled = config.get<boolean>('enable', true);
@@ -93,84 +76,64 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.executeCommand('setContext', 'symbolWindow.splitView', splitView);
 
         if (enabled) {
-            updateDatabaseManager();
-            if (dbManager) {
-                // Primary Window
-                // If splitView changed, we MUST recreate the controller to update lockedMode
-                if (!controller || lastSplitView !== splitView) {
-                    if (controller) {
-                        controller.dispose();
-                    }
-                    
-                    const lockedMode = splitView ? 'current' : undefined;
-                    controller = new SymbolController(context, lspClient, dbManager, lockedMode);
-                    
-                    if (provider) {
-                        provider.setController(controller);
-                    } else {
-                        provider = new SymbolWebviewProvider(context.extensionUri, controller);
-                        
-                        symbolViewDisposable = vscode.window.registerWebviewViewProvider(
-                            SymbolWebviewProvider.viewType,
-                            provider, {
-                                webviewOptions: {
-                                    retainContextWhenHidden: true
-                                }
-                            }
-                        );
-                        context.subscriptions.push(symbolViewDisposable);
-                    }
-                }
-
-                // Secondary Window (Project)
-                if (splitView) {
-                    if (!projectController) {
-                        projectController = new SymbolController(context, lspClient, dbManager, 'project');
-                        
-                        if (projectProvider) {
-                            projectProvider.setController(projectController);
-                        } else {
-                            projectProvider = new SymbolWebviewProvider(context.extensionUri, projectController);
-                        }
-                        
-                        projectViewDisposable = vscode.window.registerWebviewViewProvider(
-                            'symbol-window-project-view',
-                            projectProvider, {
-                                webviewOptions: {
-                                    retainContextWhenHidden: true
-                                }
-                            }
-                        );
-                        context.subscriptions.push(projectViewDisposable);
-                    }
-                } else {
-                    if (projectController) {
-                        projectController.dispose();
-                        projectController = undefined;
-                        // Keep projectProvider for reuse
-                        projectViewDisposable?.dispose();
-                        projectViewDisposable = undefined;
-                    }
+            // Primary Window
+            // If splitView changed, we MUST recreate the controller to update lockedMode
+            if (!controller || lastSplitView !== splitView) {
+                if (controller) {
+                    controller.dispose();
                 }
                 
-                lastSplitView = splitView;
-
-                // Force status update after re-enabling
-                if (dbManager.isReady) {
-                    controller?.setDatabaseReady(true);
-                    projectController?.setDatabaseReady(true);
+                const lockedMode = splitView ? 'current' : undefined;
+                controller = new SymbolController(context, codeGraph, lockedMode);
+                
+                if (provider) {
+                    provider.setController(controller);
                 } else {
-                    // If DB is not ready, we might need to trigger indexing or check status
-                    // But dbManager should handle this via events.
-                    // However, if dbManager was just created, it might not have fired events yet.
-                    // Or if it was already ready (globalDbManager), we missed the event.
-                    if (dbManager.indexer) {
-                         // Check if indexer is already done?
-                         // DatabaseManager doesn't expose current state easily besides isReady.
-                         // But we can manually trigger a status check.
-                    }
+                    provider = new SymbolWebviewProvider(context.extensionUri, controller);
+                    
+                    symbolViewDisposable = vscode.window.registerWebviewViewProvider(
+                        SymbolWebviewProvider.viewType,
+                        provider, {
+                            webviewOptions: {
+                                retainContextWhenHidden: true
+                            }
+                        }
+                    );
+                    context.subscriptions.push(symbolViewDisposable);
                 }
             }
+
+            // Secondary Window (Project)
+            if (splitView) {
+                if (!projectController) {
+                    projectController = new SymbolController(context, codeGraph, 'project');
+                    
+                    if (projectProvider) {
+                        projectProvider.setController(projectController);
+                    } else {
+                        projectProvider = new SymbolWebviewProvider(context.extensionUri, projectController);
+                    }
+                    
+                    projectViewDisposable = vscode.window.registerWebviewViewProvider(
+                        'symbol-window-project-view',
+                        projectProvider, {
+                            webviewOptions: {
+                                retainContextWhenHidden: true
+                            }
+                        }
+                    );
+                    context.subscriptions.push(projectViewDisposable);
+                }
+            } else {
+                if (projectController) {
+                    projectController.dispose();
+                    projectController = undefined;
+                    projectViewDisposable?.dispose();
+                    projectViewDisposable = undefined;
+                }
+            }
+            
+            lastSplitView = splitView;
         } else {
             if (controller) {
                 controller.dispose();
@@ -191,7 +154,6 @@ export function activate(context: vscode.ExtensionContext) {
                 projectController.dispose();
                 projectController = undefined;
             }
-            updateDatabaseManager();
         }
     };
 
@@ -202,10 +164,9 @@ export function activate(context: vscode.ExtensionContext) {
     const initRelationWindow = () => {
         const config = vscode.workspace.getConfiguration('relationWindow');
         if (config.get<boolean>('enable', true)) {
-            updateDatabaseManager();
-            if (!relationController && dbManager) {
+            if (!relationController) {
                 relationProvider = new RelationWebviewProvider(context.extensionUri);
-                relationController = new RelationController(context, relationProvider, referenceController, dbManager);
+                relationController = new RelationController(context, relationProvider, referenceController, codeGraph);
                 
                 relationViewDisposable = vscode.window.registerWebviewViewProvider(
                     RelationWebviewProvider.viewType,
@@ -225,7 +186,6 @@ export function activate(context: vscode.ExtensionContext) {
                 relationViewDisposable?.dispose();
                 relationViewDisposable = undefined;
             }
-            updateDatabaseManager();
         }
     };
 
@@ -236,7 +196,17 @@ export function activate(context: vscode.ExtensionContext) {
         if (config.get<boolean>('enable', true)) {
             if (!referenceController) {
                 referenceProvider = new ReferenceWebviewProvider(context.extensionUri);
-                referenceController = new ReferenceController(context, referenceProvider);
+                referenceController = new ReferenceController(context, referenceProvider, codeGraph);
+                referenceViewDisposable = vscode.window.registerWebviewViewProvider(
+                    ReferenceWebviewProvider.viewType,
+                    referenceProvider,
+                    {
+                        webviewOptions: {
+                            retainContextWhenHidden: true
+                        }
+                    }
+                );
+                context.subscriptions.push(referenceViewDisposable);
             }
         } else {
             // Dispose if disabled
@@ -313,23 +283,14 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('symbol-window.rebuildIndex', () => {
-            if (dbManager && dbManager.indexer) {
-                // Default to Incremental
-                dbManager.indexer.rebuildIndexIncremental();
-            } else {
-                vscode.window.showErrorMessage('Symbol Database is not available.');
-            }
+		vscode.commands.registerCommand('symbol-window.rebuildIndex', async () => {
+            await globalStatusBar.runCodeGraphCommand('sync');
 		})
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('symbol-window.rebuildIndexFull', () => {
-            if (dbManager && dbManager.indexer) {
-                dbManager.indexer.rebuildIndexFull();
-            } else {
-                vscode.window.showErrorMessage('Symbol Database is not available.');
-            }
+		vscode.commands.registerCommand('symbol-window.rebuildIndexFull', async () => {
+            await globalStatusBar.runCodeGraphCommand('init');
 		})
 	);
 
@@ -461,11 +422,17 @@ export function activate(context: vscode.ExtensionContext) {
             }
         })
     );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('reference-window.next', () => {
+            referenceController?.next();
+        }),
+        vscode.commands.registerCommand('reference-window.prev', () => {
+            referenceController?.prev();
+        })
+    );
 }
 
 export function deactivate() {
-    if (globalDbManager) {
-        globalDbManager.dispose();
-        console.log('[Source Window] Database closed.');
-    }
+    console.log('[Source Window] Deactivated.');
 }

@@ -1,13 +1,8 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
 import { SymbolModel } from './SymbolModel';
-import { parserRegistry } from './parsing/ParserRegistry';
 import { SymbolWebviewProvider } from './SymbolWebviewProvider';
 import { SymbolMode, SymbolItem } from '../../shared/common/types';
-import { SymbolDatabase, SymbolRecord } from '../../shared/db/database';
-import { SymbolIndexer } from './indexer/indexer';
-import { LspClient, LspStatus } from '../../shared/services/LspClient';
-import { DatabaseManager } from '../../shared/services/DatabaseManager';
+import { CodeGraphService } from '../../shared/services/CodeGraphService';
 import { symbolKindNames } from '../../shared/common/symbolKinds';
 
 export class SymbolController {
@@ -29,31 +24,20 @@ export class SymbolController {
 
     // Caching
     private searchCache: Map<string, SymbolItem[]> = new Map();
-    private cacheTimeout: NodeJS.Timeout | undefined;
-    private readonly CACHE_DURATION = 120000; // 2 minutes
-
     // Pagination
     private allSearchResults: SymbolItem[] = [];
     private loadedCount: number = 0;
     private readonly BATCH_SIZE = 100;
     
-    private readiness: 'standby' | 'loading' | 'ready' = 'standby';
-    private retryCount: number = 0;
-    private readonly MAX_RETRIES = 20; // 20 * 3s = 60s
-    private probeIndex: number = 0;
-    private readonly PROBE_CHARS = ['', 'e', 'a', 'i', 'o', 'u', 's', 't', 'r', 'n']; // Common letters
-    private isDatabaseReady = false;
-    private lastProgress: number | null = null;
     private disposables: vscode.Disposable[] = [];
 
     constructor(
         context: vscode.ExtensionContext,
-        private lspClient: LspClient,
-        private dbManager: DatabaseManager,
+        private codeGraph: CodeGraphService,
         private lockedMode?: SymbolMode
     ) {
         this.context = context;
-        this.model = new SymbolModel();
+        this.model = new SymbolModel(codeGraph);
         
         // Restore state
         if (this.lockedMode) {
@@ -71,34 +55,14 @@ export class SymbolController {
             vscode.commands.executeCommand('setContext', 'symbolWindow.mode', this.currentMode);
         }
 
-        // Listen to LSP status
-        this.disposables.push(this.lspClient.onStatusChange(status => {
-            this.provider?.postMessage({ command: 'status', status: status });
-            if (status === 'ready') {
-                this.dbManager.resumeIndexing();
-                // If we just became ready, refresh to show symbols
-                this.refresh();
-            } else if (status === 'loading') {
-                this.dbManager.pauseIndexing();
-            }
-        }));
-
-        // Listen to DB status
-        this.disposables.push(this.dbManager.onReadyChange(ready => {
-            this.setDatabaseReady(ready);
-        }));
-        
-        this.disposables.push(this.dbManager.onProgress(percent => {
-            this.updateProgress(percent);
-        }));
-
         // Listen to active editor changes
         this.disposables.push(vscode.window.onDidChangeActiveTextEditor(editor => {
             // Current Mode: Always try to update immediately
             if (this.currentMode === 'current') {
                 if (editor) {
                     this.updateCurrentSymbols(editor.document.uri).catch(e => {
-                        console.error('[Source Window] updateCurrentSymbols failed', e);
+                        console.error('[CodeGraph Relation] updateCurrentSymbols failed', e);
+                        this.provider?.postMessage({ command: 'status', status: 'timeout' });
                     });
                 } else {
                     this.provider?.postMessage({ command: 'updateSymbols', symbols: [] });
@@ -131,7 +95,7 @@ export class SymbolController {
         // Listen to configuration changes
         this.disposables.push(vscode.workspace.onDidChangeConfiguration(e => {
             if (e.affectsConfiguration('symbolWindow.enableHighlighting') || 
-                e.affectsConfiguration('shared.enableDatabaseMode')) {
+                e.affectsConfiguration('shared.enableRipgrepFallback')) {
                 this.refresh();
             }
         }));
@@ -160,25 +124,6 @@ export class SymbolController {
         this.refresh();
     }
 
-    public setDatabaseReady(ready: boolean) {
-        // Always notify UI, even if state hasn't changed (for re-renders)
-        this.isDatabaseReady = ready;
-        if (ready) {
-            this.lastProgress = null; // Clear progress when ready
-        }
-        
-        const dbEnabled = vscode.workspace.getConfiguration('shared').get<boolean>('enableDatabaseMode', true);
-        const effectiveReady = ready && dbEnabled;
-
-        vscode.commands.executeCommand('setContext', 'symbolWindow.databaseReady', effectiveReady);
-        // Notify webview to update UI (hide deep search, show rebuild)
-        this.provider?.postMessage({ command: 'setDatabaseMode', enabled: effectiveReady });
-        
-        if (ready) {
-            console.log('[Source Window] Indexing complete. Switching to Database Mode.');
-        }
-    }
-
     public async refresh() {
         // Clear cache on explicit refresh
         this.searchCache.clear();
@@ -186,18 +131,9 @@ export class SymbolController {
         // Sync mode to webview to ensure consistency
         this.provider?.postMessage({ command: 'setMode', mode: this.currentMode, lockedMode: this.lockedMode });
         
-        // Sync database mode state
-        // We need to check both the config AND the readiness
-        const dbEnabled = vscode.workspace.getConfiguration('shared').get<boolean>('enableDatabaseMode', true);
-        const effectiveReady = dbEnabled && this.isDatabaseReady;
-        
-        vscode.commands.executeCommand('setContext', 'symbolWindow.databaseReady', effectiveReady);
-        this.provider?.postMessage({ command: 'setDatabaseMode', enabled: effectiveReady });
-
-        // Sync progress if active
-        if (this.lastProgress !== null) {
-            this.provider?.postMessage({ command: 'progress', percent: this.lastProgress });
-        }
+        const codeGraphReady = this.codeGraph.isAvailable;
+        vscode.commands.executeCommand('setContext', 'symbolWindow.databaseReady', codeGraphReady);
+        this.provider?.postMessage({ command: 'setDatabaseMode', enabled: codeGraphReady });
 
         // Sync settings
         const config = vscode.workspace.getConfiguration('symbolWindow');
@@ -221,12 +157,7 @@ export class SymbolController {
             projectFilter: this.projectFilter 
         });
 
-        // If standby, try polling again (Manual Retry)
-        if (this.lspClient.status === 'standby') {
-            this.lspClient.startPolling();
-        } else {
-             this.provider?.postMessage({ command: 'status', status: this.lspClient.status });
-        }
+        this.provider?.postMessage({ command: 'status', status: codeGraphReady ? 'ready' : 'timeout' });
 
         if (this.currentMode === 'current') {
             const editor = vscode.window.activeTextEditor;
@@ -240,8 +171,7 @@ export class SymbolController {
             return;
         }
 
-        // Project Mode Logic
-        if (this.lspClient.status === 'loading') {
+        if (!codeGraphReady) {
             return;
         }
         
@@ -275,16 +205,11 @@ export class SymbolController {
             });
         }
         
-        // If ready, refresh. If standby, maybe poll?
-        if (this.lspClient.status === 'ready') {
-            this.refresh();
-        } else if (this.lspClient.status === 'standby') {
-            this.lspClient.startPolling();
-        }
+        this.refresh();
     }
 
     public async startPolling() {
-        this.lspClient.startPolling();
+        this.refresh();
     }
 
     public cancelSearch() {
@@ -307,9 +232,8 @@ export class SymbolController {
                 this.projectFilter = kinds;
             }
 
-            // If not ready, don't search, just ensure UI is in loading state
-            if (this.lspClient.status !== 'ready') {
-                this.provider?.postMessage({ command: 'status', status: 'loading' });
+            if (!this.codeGraph.isAvailable) {
+                this.provider?.postMessage({ command: 'status', status: 'timeout' });
                 return;
             }
 
@@ -324,95 +248,15 @@ export class SymbolController {
             if (this.debounceTimer) { clearTimeout(this.debounceTimer); }
             
             const searchId = ++this.currentSearchId;
-            const config = vscode.workspace.getConfiguration('shared');
-            const enableDatabaseMode = config.get<boolean>('enableDatabaseMode', false);
-
-            // Hybrid Transition: Use DB only if indexing is complete (isDatabaseReady)
-            if (enableDatabaseMode && this.dbManager.getDb() && this.isDatabaseReady) {
-                this.debounceTimer = setTimeout(async () => {
-                    if (searchId !== this.currentSearchId) { return; }
-                    
-                    this.currentQuery = query;
-                    this.provider?.postMessage({ command: 'searchStart' });
-                    
-                    if (!query) {
-                        this.provider?.postMessage({ command: 'updateSymbols', symbols: [] });
-                        return;
-                    }
-
-                    try {
-                        // If kinds is empty, it means "select none", so return empty immediately (Scheme B)
-                        if (kinds && kinds.length === 0) {
-                            this.allSearchResults = [];
-                            this.loadedCount = 0;
-                            this.provider?.postMessage({ 
-                                command: 'updateSymbols', 
-                                symbols: []
-                            });
-                            return;
-                        }
-
-                        // Optimization: If kinds contains ALL kinds, pass undefined to DB to skip "IN (...)" check
-                        const totalKinds = Object.keys(symbolKindNames).length;
-                        const effectiveKinds = (kinds && kinds.length >= totalKinds) ? undefined : kinds;
-
-                        const records = this.dbManager.getDb()!.search(query, this.BATCH_SIZE, 0, effectiveKinds);
-                        const items = records.map((r: SymbolRecord) => this.mapRecordToItem(r));
-                        
-                        this.allSearchResults = items;
-                        this.loadedCount = items.length;
-                        
-                        this.provider?.postMessage({ 
-                            command: 'updateSymbols', 
-                            symbols: items
-                        });
-                    } catch (e) {
-                        console.error('[Source Window] DB Search failed:', e);
-                    }
-                }, 300);
-                return;
-            }
-
             const debounceTime = 300;
 
             this.debounceTimer = setTimeout(async () => {
                 if (searchId !== this.currentSearchId) { return; }
 
-                if (!query) {
-                    this.currentQuery = '';
-                    this.provider?.postMessage({ command: 'updateSymbols', symbols: [] });
-                    return;
-                }
-                
                 this.currentQuery = query;
                 const keywords = query.trim().split(/\s+/).filter(k => k.length > 0);
                 
                 this.provider?.postMessage({ command: 'searchStart' });
-
-                if (keywords.length === 0) {
-                     this.provider?.postMessage({ command: 'updateSymbols', symbols: [] });
-                     return;
-                }
-
-                // --- Caching Logic Start ---
-                
-                // 1. Prune cache: Remove keys not in current query
-                for (const key of this.searchCache.keys()) {
-                    if (!keywords.includes(key)) {
-                        this.searchCache.delete(key);
-                    }
-                }
-
-                // 2. Reset Timeout
-                if (this.cacheTimeout) { clearTimeout(this.cacheTimeout); }
-                this.cacheTimeout = setTimeout(() => {
-                    this.searchCache.clear();
-                }, this.CACHE_DURATION);
-
-                // 3. Identify missing keywords
-                const missingKeywords = keywords.filter(k => !this.searchCache.has(k));
-
-                // --- Caching Logic End ---
 
                 this.searchCts = new vscode.CancellationTokenSource();
                 const token = this.searchCts.token;
@@ -420,42 +264,18 @@ export class SymbolController {
                 let allSymbols: SymbolItem[] = [];
 
                 try {
-                    // Standard Search Logic (LSP)
-                    // Fetch missing keywords
-                    if (missingKeywords.length > 0) {
-                        const searchPromises = missingKeywords.map(async (keyword) => {
-                            const results = await this.model.getWorkspaceSymbols(keyword, token);
-                            return { keyword, results };
-                        });
-
-                        const newResults = await Promise.all(searchPromises);
-
-                        if (searchId !== this.currentSearchId || token.isCancellationRequested) { 
-                            return; 
-                        }
-
-                        // Update cache
-                        newResults.forEach(({ keyword, results }) => {
-                            this.searchCache.set(keyword, results);
-                        });
+                    allSymbols = keywords.length === 0
+                        ? await this.model.getProjectSymbols()
+                        : await this.model.getWorkspaceSymbols(query);
+                    if (searchId !== this.currentSearchId || token.isCancellationRequested) {
+                        return;
                     }
 
-                    // Collect results from cache for ALL keywords
-                    const symbolMap = new Map<string, SymbolItem>();
-                    
-                    keywords.forEach(k => {
-                        const cached = this.searchCache.get(k);
-                        if (cached) {
-                            cached.forEach(symbol => {
-                                const key = `${symbol.name}|${symbol.detail}|${symbol.range.start.line}:${symbol.range.start.character}`;
-                                if (!symbolMap.has(key)) {
-                                    symbolMap.set(key, symbol);
-                                }
-                            });
-                        }
-                    });
-
-                    allSymbols = Array.from(symbolMap.values());
+                    if (kinds && kinds.length === 0) {
+                        allSymbols = [];
+                    } else if (kinds && kinds.length < Object.keys(symbolKindNames).length) {
+                        allSymbols = allSymbols.filter(symbol => kinds.includes(symbol.kind));
+                    }
 
                     // Client-side Filtering: Ensure result matches ALL keywords
                     if (keywords.length > 1) {
@@ -479,19 +299,16 @@ export class SymbolController {
                         symbols: initialBatch,
                         totalCount: this.allSearchResults.length 
                     });
+                    this.provider?.postMessage({ command: 'status', status: 'ready' });
 
                 } catch (error) {
                     if (error instanceof vscode.CancellationError) {
                         // ignore
                     } else {
-                        console.error(`[Source Window] SearchId ${searchId} failed`, error);
-                        
-                        // LSP Crash / Error Recovery
-                        // If the search fails (e.g. LSP crash), revert to standby and try to recover
-                        this.provider?.postMessage({ command: 'status', status: 'loading' }); // Show loading in UI
-                        this.lspClient.startPolling();
-
-                        // Stop the search progress bar
+                        console.error(`[CodeGraph Relation] SearchId ${searchId} failed`, error);
+                        this.allSearchResults = [];
+                        this.loadedCount = 0;
+                        this.provider?.postMessage({ command: 'status', status: 'ready' });
                         this.provider?.postMessage({ command: 'updateSymbols', symbols: [] });
                     }
                     return;
@@ -501,15 +318,17 @@ export class SymbolController {
     }
 
     private async updateCurrentSymbols(uri: vscode.Uri) {
-        const symbols = await this.model.getDocumentSymbols(uri);
-        this.currentDocumentSymbols = symbols;
-        
-        // Note: We do NOT force status to 'ready' here anymore.
-        // We rely on the global readiness state (determined by workspace polling)
-        // to tell the UI when to stop loading. This prevents "False Ready" states
-        // where we get empty symbols because the LSP is initializing.
-        
-        this.provider?.postMessage({ command: 'updateSymbols', symbols });
+        try {
+            const symbols = await this.model.getDocumentSymbols(uri);
+            this.currentDocumentSymbols = symbols;
+            this.provider?.postMessage({ command: 'status', status: this.codeGraph.isAvailable ? 'ready' : 'timeout' });
+            this.provider?.postMessage({ command: 'updateSymbols', symbols });
+        } catch (error) {
+            console.error('[CodeGraph Relation] Failed to load document symbols', error);
+            this.currentDocumentSymbols = [];
+            this.provider?.postMessage({ command: 'status', status: 'timeout' });
+            this.provider?.postMessage({ command: 'updateSymbols', symbols: [] });
+        }
     }
 
     public jumpTo(uriStr: string | undefined, range: any) {
@@ -528,21 +347,6 @@ export class SymbolController {
 
     public loadMore() {
         if (this.currentMode === 'project') {
-            const config = vscode.workspace.getConfiguration('shared');
-            if (config.get('enableDatabaseMode') && this.dbManager.getDb() && this.isDatabaseReady) {
-                const nextBatch = this.dbManager.getDb()!.search(this.currentQuery, this.BATCH_SIZE, this.loadedCount);
-                if (nextBatch.length > 0) {
-                    const items = nextBatch.map((r: SymbolRecord) => this.mapRecordToItem(r));
-                    this.allSearchResults.push(...items);
-                    this.loadedCount += items.length;
-                    this.provider?.postMessage({ 
-                        command: 'appendSymbols', 
-                        symbols: items
-                    });
-                }
-                return;
-            }
-
             if (this.loadedCount < this.allSearchResults.length) {
                 const start = this.loadedCount;
                 this.loadedCount += this.BATCH_SIZE;
@@ -557,7 +361,6 @@ export class SymbolController {
     }
 
     public async deepSearch(isAuto: boolean = false) {
-        // Deep Search is only available in Project Mode when Database is NOT ready
         if (this.currentMode !== 'project' || !this.currentQuery) {
             return;
         }
@@ -685,60 +488,6 @@ export class SymbolController {
         }
     }
 
-    private mapRecordToItem(record: any): SymbolItem {
-        const config = vscode.workspace.getConfiguration('symbolWindow');
-        const mode = config.get<string>('symbolParsing.mode', 'auto');
-
-        const ext = record.file_path ? record.file_path.split('.').pop()?.toLowerCase() || '' : '';
-        let languageId = '';
-        if (ext === 'c' || ext === 'h') {
-            languageId = 'c';
-        } else if (ext === 'cpp' || ext === 'hpp' || ext === 'cc') {
-            languageId = 'cpp';
-        } else if (ext === 'java') {
-            languageId = 'java';
-        } else if (ext === 'cs') {
-            languageId = 'csharp';
-        }
-
-        const parser = parserRegistry.getParser(languageId, mode);
-        const { name, detail } = parser.parse(record.name, record.detail || '', record.kind);
-
-        let finalDetail = detail;
-        // In Project Mode, it's helpful to see the container name (e.g. Class)
-        if (record.container_name && record.container_name !== finalDetail) {
-            finalDetail = finalDetail ? `${finalDetail}  ${record.container_name}` : record.container_name;
-        }
-
-        const relativePath = vscode.workspace.asRelativePath(vscode.Uri.file(record.file_path));
-        const filename = path.basename(record.file_path);
-        let location = '';
-        if (relativePath === filename) {
-            location = `${filename}:${record.range_start_line + 1}`;
-        } else {
-            const dir = relativePath.substring(0, relativePath.length - filename.length - 1);
-            location = `${filename} (${dir}):${record.range_start_line + 1}`;
-        }
-
-        return {
-            name: name,
-            detail: finalDetail,
-            path: location,
-            kind: record.kind,
-            range: new vscode.Range(
-                record.range_start_line, record.range_start_char,
-                record.range_end_line, record.range_end_char
-            ),
-            selectionRange: new vscode.Range(
-                record.selection_range_start_line, record.selection_range_start_char,
-                record.selection_range_end_line, record.selection_range_end_char
-            ),
-            children: [],
-            uri: vscode.Uri.file(record.file_path).toString(),
-            containerName: record.container_name
-        };
-    }
-
     private sortSymbols(symbols: SymbolItem[], query: string): SymbolItem[] {
         const queryLower = query.toLowerCase();
         return symbols.sort((a, b) => {
@@ -758,14 +507,6 @@ export class SymbolController {
             // 3. Alphabetical
             return aName.localeCompare(bName);
         });
-    }
-
-    public updateProgress(percent: number) {
-        this.lastProgress = percent;
-        if (percent >= 100) {
-            this.lastProgress = null;
-        }
-        this.provider?.postMessage({ command: 'progress', percent });
     }
 
     public saveFilters(currentFilter: number[], projectFilter: number[]) {

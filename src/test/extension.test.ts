@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { CStyleParser } from '../features/symbol/parsing/strategies/CStyleParser';
+import { CStyleParser } from '../features/symbol/parsing/strategies/CStyleParser.js';
 
 suite('CStyleParser Test Suite', () => {
 	const parser = new CStyleParser();

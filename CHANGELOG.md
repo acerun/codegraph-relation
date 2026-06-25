@@ -7,6 +7,24 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ## [Unreleased]
 
 
+## [1.1.0] - 2026-06-24
+
+### Changed
+- **CodeGraph-powered Architecture**: Replaced the internal LSP client (`LspClient`) and SQLite database (`DatabaseManager`) with a unified `CodeGraphService`. All symbol indexing, search, and relation queries now delegate to the CodeGraph engine, removing ~3000 lines of internal indexing and database code.
+- **Simplified Symbol & Relation Models**: `SymbolModel` and `RelationModel` are now thin wrappers around `CodeGraphService`, eliminating redundant caching and LSP orchestration logic.
+- **Global Status Bar**: Reworked `GlobalStatusBar` to reflect CodeGraph indexing state and provide clearer progress feedback.
+- **Configuration Cleanup**: Removed legacy `shared.enableDatabaseMode`, `shared.indexingBatchSize`, and `shared.database.cacheSizeMB` settings that are no longer applicable under the CodeGraph architecture.
+
+### Added
+- **Relation Cache**: Added `relationCache.ts` for short-lived in-memory caching of relation results, reducing repeated queries.
+- **Tests**: Added `CodeGraphService.test.ts`, `GlobalStatusBar.test.ts`, and `codegraph.integration.test.ts` for the new service layer.
+- **Smoke Script**: Added `scripts/smoke-codegraph-service.js` for quick validation of the CodeGraph integration.
+
+### Removed
+- **LSP Client**: Removed `src/shared/services/LspClient.ts` — LSP connections are now managed externally by CodeGraph.
+- **Database Manager**: Removed `src/shared/services/DatabaseManager.ts` and `src/shared/db/database.ts` — SQLite indexing is replaced by CodeGraph's internal storage.
+- **Internal Indexer**: Removed `src/features/symbol/indexer/indexer.ts` — file watching and batch indexing are handled by CodeGraph.
+
 ## [1.0.3] - 2026-03-31
 
 ### Changed

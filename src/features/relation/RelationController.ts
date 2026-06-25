@@ -7,8 +7,9 @@ import { parserRegistry } from '../symbol/parsing/ParserRegistry';
 import { v4 as uuidv4 } from 'uuid';
 import * as path from 'path';
 import { previewLocation } from '../../shared/utils/navigation';
+import { applyPrefetchedChildren, shouldPublishResolvedChildren } from './relationCache';
 
-import { DatabaseManager } from '../../shared/services/DatabaseManager';
+import { CodeGraphService } from '../../shared/services/CodeGraphService';
 import { symbolKindNames } from '../../shared/common/symbolKinds';
 
 export class RelationController {
@@ -25,6 +26,7 @@ export class RelationController {
     private history: HistoryEntry[] = [];
     private historyIndex: number = -1;
     private itemCache: Map<string, vscode.CallHierarchyItem> = new Map();
+    private relationItemCache: Map<string, RelationItem> = new Map();
     
     // Internal history with full objects
     private internalHistory: { 
@@ -42,6 +44,7 @@ export class RelationController {
     private cancellationTokenSource: vscode.CancellationTokenSource | undefined;
     // Map to track cancellation tokens for individual node expansions
     private nodeExpansionTokens: Map<string, vscode.CancellationTokenSource> = new Map();
+    private readonly maxPrefetchChildren = 40;
 
     // Pagination for References
     private cachedReferences: vscode.Location[] = [];
@@ -56,10 +59,10 @@ export class RelationController {
         context: vscode.ExtensionContext, 
         webviewProvider: RelationWebviewProvider, 
         referenceController: ReferenceController | undefined,
-        dbManager: DatabaseManager
+        codeGraph: CodeGraphService
     ) {
         this.context = context;
-        this.model = new RelationModel(dbManager);
+        this.model = new RelationModel(codeGraph);
         this.webviewProvider = webviewProvider;
         this.referenceController = referenceController;
 
@@ -352,64 +355,7 @@ export class RelationController {
             
             const vscodeRange = new vscode.Range(start, end);
 
-            // Use selectionRange if available for better highlighting?
-            // But range passed here is usually the target range.
-            // User wants: "無論 root node 還是 children，選取的都是 selection_range"
-            // But handleJump receives 'range'. We need to ensure 'range' passed from UI IS the selectionRange.
-            // Or we can pass both and prefer selectionRange.
-            // Currently UI passes item.range (or item.selectionRange?).
-            // Let's check UI code or just assume we should use selectionRange if passed.
-            // But wait, handleJump signature is (uriStr, range).
-            // If we want to force selectionRange, we should ensure the caller passes selectionRange.
-            
-            // However, for Root Node double click behavior:
-            // The Root Node in UI has 'range' and 'selectionRange'.
-            // If user double clicks, UI sends 'jump' command with 'range'.
-            // We should change UI to send 'selectionRange' if available.
-            
-            // But if we can't change UI easily right now, we can try to find the item in cache?
-            // No, jump might come from history or anywhere.
-            
-            // Let's look at toRelationItem. It sets range=item.range, selectionRange=item.selectionRange.
-            // In UI (RelationTree.tsx/RelationItemView.tsx), what is sent?
-            // Usually it sends item.range.
-            
-            // If we want to fix this in Controller:
-            // We can't easily know if 'range' is full range or selection range just by looking at it.
-            // But we can change toRelationItem to SWAP them? No that's dangerous.
-            
-            // Best fix: Ensure UI sends selectionRange for jump.
-            // But wait, user said "root node 的選取範圍會用 symbol 的 range 而非 selection_range".
-            // This implies when we showTextDocument, we are selecting the whole function body (range) instead of just the name (selectionRange).
-            
-            // If we want to fix this here:
-            // We can try to use selectionRange if we have the item in cache?
-            // But handleJump is generic.
-            
-            // Let's assume we fix it by ensuring the range passed to showTextDocument IS the selectionRange.
-            // If the caller passed the full range, we can't "shrink" it to selectionRange without parsing.
-            
-            // So we must ensure the caller (UI or internal logic) passes the correct range.
-            // In 'resolveHierarchy', we set currentRoot.
-            // When we render, we send RelationItem.
-            
-            // Let's look at 'onCursorMove' -> 'sync'.
-            // sync calls 'updateView'.
-            // updateView sends 'relationRoot'.
-            // relationRoot has 'range' and 'selectionRange'.
-            
-            // If the user double clicks the root node in the tree:
-            // The tree view sends a command.
-            // If the tree view uses 'item.range' for the command payload, that's the issue.
-            
-            // But wait, the user also said: "有時候剛開啟或者跳轉去別的 activity bar工具再回來，游标点击 symbol 后，relation window 會沒去抓游标位置的内容并作动"
-            // This sounds like onDidChangeTextEditorSelection is not firing or we are ignoring it.
-            // We have 'if (this.isLocked) return;' and 'if (this.isJumping) return;'.
-            // Maybe isJumping gets stuck? We have a timeout.
-            // Or maybe the event doesn't fire when switching focus back?
-            // When switching back to editor, onDidChangeTextEditorSelection might not fire if selection didn't change.
-            // We should also listen to onDidChangeActiveTextEditor.
-            
+            // Navigation receives a range selected by the webview. Relation items should pass selectionRange when they want symbol-name navigation.
             await vscode.window.showTextDocument(uri, {
                 selection: vscodeRange,
                 preserveFocus: preserveFocus,
@@ -496,6 +442,7 @@ export class RelationController {
                 // Re-fetch children for current root
                 const rootId = uuidv4();
                 this.itemCache.clear();
+                this.relationItemCache.clear();
                 this.itemCache.set(rootId, this.currentRoot);
                 const relationRoot = this.toRelationItem(this.currentRoot, rootId);
                 
@@ -616,13 +563,13 @@ export class RelationController {
                 // 1. Try Call Hierarchy
                 let rootItem = await this.model.prepareCallHierarchy(uri, position);
 
-                // Check if LSP returned the container instead of the target (Caller vs Callee fix)
+                // Check if CodeGraph returned the container instead of the target (Caller vs Callee fix)
                 const doc = await vscode.workspace.openTextDocument(uri);
                 const wordRange = doc.getWordRangeAtPosition(position);
                 const word = wordRange ? doc.getText(wordRange) : '';
                 
                 if (rootItem && word && rootItem.name !== word) {
-                     // A. Try to find definition of the word to get the REAL Call Hierarchy item (LSP compatible)
+                     // A. Try to find definition of the word to get the REAL Call Hierarchy item (CodeGraph compatible)
                      const defLoc = await this.model.getDefinition(uri, position);
                      if (defLoc) {
                          const defItem = await this.model.prepareCallHierarchy(defLoc.uri, defLoc.range.start);
@@ -657,6 +604,7 @@ export class RelationController {
                     // New valid symbol
                     this.currentRoot = rootItem;
                     this.itemCache.clear();
+                this.relationItemCache.clear();
                     
                     // Cache root
                     const rootId = uuidv4();
@@ -771,6 +719,7 @@ export class RelationController {
                                 kind: rootItem.kind
                             });
                             this.itemCache.clear();
+                this.relationItemCache.clear();
                             this.itemCache.set(rootId, rootItem);
                             // Also cache the category nodes? No, they are virtual.
                             // But if user expands a child of category, it works fine.
@@ -797,6 +746,7 @@ export class RelationController {
                                     });
 
                                     this.itemCache.clear();
+                this.relationItemCache.clear();
                                     this.itemCache.set(rootId, rootItem);
                                     this.updateView(relationRoot, children, requestId);
                                 }
@@ -838,6 +788,16 @@ export class RelationController {
     private async resolveHierarchy(itemId: string, direction: 'incoming' | 'outgoing') {
         const item = this.itemCache.get(itemId);
         if (item) {
+            const cachedRelationItem = this.findCachedRelationItem(itemId);
+            if (cachedRelationItem?.children) {
+                this.webviewProvider.postMessage({
+                    command: 'updateNode',
+                    itemId: itemId,
+                    children: cachedRelationItem.children
+                });
+                return;
+            }
+
             // Cancel any existing expansion for this node
             if (this.nodeExpansionTokens.has(itemId)) {
                 this.nodeExpansionTokens.get(itemId)?.cancel();
@@ -852,8 +812,9 @@ export class RelationController {
 
             try {
                 const childrenMap = new Map<string, RelationItem>();
+                let hasPublishedUpdate = false;
                 
-                const update = (newItems: RelationItem[]) => {
+                const update = async (newItems: RelationItem[]) => {
                     if (token.isCancellationRequested) {
                         return;
                     }
@@ -868,32 +829,39 @@ export class RelationController {
                             childrenMap.set(key, newItem);
                             changed = true;
                         } else if (existing.isDeepSearch && !newItem.isDeepSearch) {
-                            // Upgrade to LSP item if available
+                            // Upgrade to CodeGraph item if available
                             childrenMap.set(key, newItem);
                             changed = true;
                         }
                     }
                     
-                    if (changed) {
+                    const children = Array.from(childrenMap.values());
+                    if (changed || shouldPublishResolvedChildren(hasPublishedUpdate, children)) {
+                        await this.prefetchChildren(children, direction, token);
+                        if (cachedRelationItem) {
+                            applyPrefetchedChildren(cachedRelationItem, children);
+                        }
+                        this.registerRelationItems(children);
                         this.webviewProvider.postMessage({
                             command: 'updateNode',
                             itemId: itemId,
-                            children: Array.from(childrenMap.values())
+                            children: children
                         });
+                        hasPublishedUpdate = true;
                     }
                 };
 
-                // Task A: LSP
-                const lspTask = this.fetchChildrenLsp(item, direction, token).then(children => {
-                    update(children);
+                // Task A: CodeGraph
+                const codeGraphTask = this.fetchChildrenCodeGraph(item, direction, token).then(children => {
+                    return update(children);
                 });
 
                 // Task B: Deep Search
                 const deepSearchTask = this.fetchChildrenDeep(item, direction, token).then(children => {
-                    update(children);
+                    return update(children);
                 });
 
-                await Promise.allSettled([lspTask, deepSearchTask]);
+                await Promise.allSettled([codeGraphTask, deepSearchTask]);
             } finally {
                 this.webviewProvider.postMessage({ command: 'setLoading', isLoading: false });
 
@@ -915,7 +883,7 @@ export class RelationController {
     ): Promise<RelationItem[]> {
         const childrenMap = new Map<string, RelationItem>();
         
-        const update = (newItems: RelationItem[]) => {
+        const update = async (newItems: RelationItem[]) => {
             let changed = false;
             for (const newItem of newItems) {
                 // Key based on Call Site (Source URI + Range)
@@ -946,13 +914,13 @@ export class RelationController {
                     if (newItem.isDeepSearch) {
                         // New item is Deep Search
                         if (!existing.isDeepSearch) {
-                            // Existing is LSP -> Use Deep Search Range (more precise) but keep LSP Target
+                            // Existing is CodeGraph -> Use Deep Search Range (more precise) but keep CodeGraph Target
                             existing.range = newItem.range;
                             changed = true;
                         }
                         // If existing is also Deep Search, ignore
                     } else {
-                        // New item is LSP
+                        // New item is CodeGraph
                         if (existing.isDeepSearch) {
                             // Existing is Deep Search -> Verify it!
                             existing.isDeepSearch = false; // Remove special background
@@ -962,30 +930,33 @@ export class RelationController {
                             // Keep existing.range (Deep Search range)
                             changed = true;
                         }
-                        // If existing is also LSP, ignore
+                        // If existing is also CodeGraph, ignore
                     }
                 }
             }
             
             if (changed) {
-                onUpdate(Array.from(childrenMap.values()));
+                const children = Array.from(childrenMap.values());
+                await this.prefetchChildren(children, direction, token);
+                this.registerRelationItems(children);
+                onUpdate(children);
             }
         };
 
-        // Task A: LSP
-        const lspTask = this.fetchChildrenLsp(item, direction, token).then(children => {
+        // Task A: CodeGraph
+        const codeGraphTask = this.fetchChildrenCodeGraph(item, direction, token).then(children => {
             if (token.isCancellationRequested) {return;}
-            update(children);
+            return update(children);
         });
 
         // Task B: Deep Search
         const deepSearchTask = this.fetchChildrenDeep(item, direction, token).then(children => {
             if (token.isCancellationRequested) {return;}
-            update(children);
+            return update(children);
         });
 
         // Wait for both
-        await Promise.allSettled([lspTask, deepSearchTask]);
+        await Promise.allSettled([codeGraphTask, deepSearchTask]);
 
         if (token.isCancellationRequested) {return [];}
         
@@ -993,7 +964,10 @@ export class RelationController {
             this.webviewProvider.postMessage({ command: 'setLoading', isLoading: false });
         }
 
-        return Array.from(childrenMap.values());
+        const children = Array.from(childrenMap.values());
+        await this.prefetchChildren(children, direction, token);
+        this.registerRelationItems(children);
+        return children;
     }
 
     private getCleanName(name: string): string {
@@ -1001,7 +975,52 @@ export class RelationController {
         return match ? match[0] : name;
     }
 
-    private async fetchChildrenLsp(item: vscode.CallHierarchyItem, direction: 'incoming' | 'outgoing', token?: vscode.CancellationToken): Promise<RelationItem[]> {
+    private async prefetchChildren(
+        items: RelationItem[],
+        direction: 'incoming' | 'outgoing',
+        token?: vscode.CancellationToken
+    ) {
+        const itemsToPrefetch = items
+            .filter(item => !item.isCategory && !item.isLoadMore && !item.isRef && !item.children)
+            .slice(0, this.maxPrefetchChildren);
+
+        for (const item of itemsToPrefetch) {
+            if (token?.isCancellationRequested) {
+                return;
+            }
+
+            const cachedItem = this.itemCache.get(item.id);
+            if (!cachedItem) {
+                continue;
+            }
+
+            try {
+                const children = await this.fetchChildrenCodeGraph(cachedItem, direction, token);
+                if (token?.isCancellationRequested) {
+                    return;
+                }
+                applyPrefetchedChildren(item, children);
+                this.registerRelationItems(children);
+            } catch (error) {
+                console.error('[Source Window] Failed to prefetch relation children', error);
+            }
+        }
+    }
+
+    private findCachedRelationItem(itemId: string): RelationItem | undefined {
+        return this.relationItemCache.get(itemId);
+    }
+
+    private registerRelationItems(items: RelationItem[]) {
+        for (const item of items) {
+            this.relationItemCache.set(item.id, item);
+            if (item.children) {
+                this.registerRelationItems(item.children);
+            }
+        }
+    }
+
+    private async fetchChildrenCodeGraph(item: vscode.CallHierarchyItem, direction: 'incoming' | 'outgoing', token?: vscode.CancellationToken): Promise<RelationItem[]> {
         if (token?.isCancellationRequested) {return [];}
         
         const results: RelationItem[] = [];
@@ -1407,6 +1426,7 @@ export class RelationController {
         const config = vscode.workspace.getConfiguration('relationWindow');
         const showBoth = config.get<boolean>('showBothDirections', false);
         const autoExpandBoth = config.get<boolean>('autoExpandBothDirections', false);
+        this.registerRelationItems([root, ...children]);
 
         this.webviewProvider.postMessage({
             command: 'updateRelation',
@@ -1476,6 +1496,7 @@ export class RelationController {
                 // Restore word fallback
                 this.currentRoot = entry.root;
                 this.itemCache.clear();
+                this.relationItemCache.clear();
 
                 if (entry.context) {
                     // Re-fetch references
@@ -1507,6 +1528,7 @@ export class RelationController {
                 // Restore CallHierarchyItem
                 this.currentRoot = entry.root;
                 this.itemCache.clear();
+                this.relationItemCache.clear();
                 
                 const rootId = uuidv4();
                 this.itemCache.set(rootId, entry.root);

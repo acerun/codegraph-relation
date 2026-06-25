@@ -710,6 +710,37 @@ body.reference-window .search-container {
     border-bottom: 1px solid var(--vscode-editorWidget-border);
 }
 
+.reference-empty {
+    padding: 8px;
+    color: var(--vscode-descriptionForeground);
+}
+
+.reference-list {
+    padding: 4px 0;
+}
+
+.reference-item {
+    padding: 6px 8px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
+}
+
+.reference-item:hover,
+.reference-item.selected {
+    background: var(--vscode-list-hoverBackground);
+}
+
+.reference-preview {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.reference-path {
+    margin-top: 2px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 11px;
+}
 
 .symbol-highlight {
     font-weight: bold;

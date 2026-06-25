@@ -10,13 +10,21 @@ export interface DeepSearchOptions {
     isWordMatch?: boolean;
     includePattern?: string;
     excludePattern?: string;
+    disabledByDefault?: boolean;
 }
 
 export async function performDeepSearch(options: DeepSearchOptions): Promise<vscode.Location[]> {
-    const { query, cwd, isCaseSensitive = false, isWordMatch = false, includePattern, excludePattern } = options;
+    const { query, cwd, isCaseSensitive = false, isWordMatch = false, includePattern, excludePattern, disabledByDefault = false } = options;
 
     if (!query || !cwd) {
         return [];
+    }
+
+    if (disabledByDefault) {
+        const enabled = vscode.workspace.getConfiguration('shared').get<boolean>('enableRipgrepFallback', false);
+        if (!enabled) {
+            return [];
+        }
     }
 
     const args = [

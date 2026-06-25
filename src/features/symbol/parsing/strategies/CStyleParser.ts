@@ -42,7 +42,7 @@ export class CStyleParser implements SymbolParser {
         }
         
         if (finalDetail) {
-            // Avoid duplication if detail is exactly the signature (some LSPs do this)
+            // Avoid duplication if detail is exactly the signature.
             if (finalDetail !== signatureSuffix) {
                 parts.push(finalDetail);
             }

@@ -1,119 +1,91 @@
 import * as vscode from 'vscode';
-import { LspClient, LspStatus } from '../services/LspClient';
-import { DatabaseManager } from '../services/DatabaseManager';
+import { CodeGraphService } from '../services/CodeGraphService';
 
 export class GlobalStatusBar {
     private statusBarItem: vscode.StatusBarItem;
-    private lspStatus: LspStatus = 'standby';
-    private isIndexing: boolean = false;
-    private indexProgress: number = 0;
-
-    private dbListener: vscode.Disposable | undefined;
+    private isRunning = false;
 
     constructor(
         context: vscode.ExtensionContext,
-        private lspClient: LspClient,
-        private dbManager: DatabaseManager | undefined
+        private readonly codeGraph: CodeGraphService,
+        private readonly onIndexUpdated?: () => void | Promise<void>
     ) {
-        this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-        context.subscriptions.push(this.statusBarItem);
-
-        // Listen to LSP
-        this.lspClient.onStatusChange(status => {
-            this.lspStatus = status;
-            this.update();
-        });
-        this.lspStatus = this.lspClient.status;
-
-        // Listen to DB
-        if (this.dbManager) {
-            this.bindDbEvents();
-        }
-
-        // Register command handler for status bar click
+        this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
         this.statusBarItem.command = 'symbol-window.showStatusMenu';
         context.subscriptions.push(
+            this.statusBarItem,
             vscode.commands.registerCommand('symbol-window.showStatusMenu', this.showMenu.bind(this))
         );
-
         this.update();
     }
 
-    public setDatabaseManager(dbManager: DatabaseManager | undefined) {
-        this.dbListener?.dispose();
-        this.dbManager = dbManager;
-        if (this.dbManager) {
-            this.bindDbEvents();
-        } else {
-            this.isIndexing = false;
-            this.update();
-        }
-    }
-
-    private bindDbEvents() {
-        if (!this.dbManager) {
+    public update() {
+        if (this.isRunning) {
             return;
         }
-        this.dbListener = this.dbManager.onProgress(percent => {
-            this.isIndexing = percent < 100;
-            this.indexProgress = percent;
+
+        if (this.codeGraph.isAvailable) {
+            this.statusBarItem.text = '$(graph) CodeGraph: Ready';
+            this.statusBarItem.tooltip = 'Using the workspace .codegraph index.';
+            this.codeGraph.status();
+        } else {
+            this.statusBarItem.text = '$(warning) CodeGraph: Missing';
+            this.statusBarItem.tooltip = 'Run codegraph init in the workspace root.';
+            this.codeGraph.status();
+        }
+        this.statusBarItem.show();
+    }
+
+    public static createStatusMenuItems(): vscode.QuickPickItem[] {
+        return [
+            {
+                label: '$(terminal) codegraph init',
+                detail: 'Initialize the CodeGraph index for the current workspace.'
+            },
+            {
+                label: '$(sync) codegraph sync',
+                detail: 'Synchronize the existing CodeGraph index for the current workspace.'
+            }
+        ];
+    }
+
+    public async runCodeGraphCommand(command: 'init' | 'sync') {
+        this.isRunning = true;
+        this.setProgress(command, 0);
+
+        try {
+            await this.codeGraph.runWorkspaceCommand(command, percent => this.setProgress(command, percent));
+            this.setProgress(command, 100);
+            vscode.window.showInformationMessage(`CodeGraph ${command} completed.`);
+            await this.onIndexUpdated?.();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            vscode.window.showErrorMessage(`CodeGraph ${command} failed: ${message}`);
+        } finally {
+            this.isRunning = false;
             this.update();
-        });
+        }
     }
 
     private async showMenu() {
-        const items: vscode.QuickPickItem[] = [
-            {
-                label: '$(sync) Rebuild Index (Incremental)',
-                description: 'Update index based on file changes',
-                detail: 'Use this if symbols are missing or outdated.',
-                picked: true // Default selection
-            },
-            {
-                label: '$(trash) Rebuild Index (Full)',
-                description: 'Clear database and rebuild from scratch',
-                detail: 'Use this if the database is corrupted or incremental update fails.'
-            }
-        ];
-
-        const selection = await vscode.window.showQuickPick(items, {
-            placeHolder: 'Symbol Window Database Actions'
+        const selection = await vscode.window.showQuickPick(GlobalStatusBar.createStatusMenuItems(), {
+            placeHolder: 'CodeGraph actions'
         });
 
-        if (selection) {
-            if (selection.label.includes('Incremental')) {
-                vscode.commands.executeCommand('symbol-window.rebuildIndex');
-            } else if (selection.label.includes('Full')) {
-                vscode.commands.executeCommand('symbol-window.rebuildIndexFull');
-            }
+        if (!selection) {
+            return;
+        }
+
+        if (selection.label.includes('init')) {
+            await this.runCodeGraphCommand('init');
+        } else if (selection.label.includes('sync')) {
+            await this.runCodeGraphCommand('sync');
         }
     }
 
-    private update() {
-        if (this.lspStatus === 'loading') {
-            this.statusBarItem.text = '$(sync~spin) Symbol: Waiting for LSP...';
-            this.statusBarItem.show();
-            return;
-        }
-
-        if (this.isIndexing) {
-            this.statusBarItem.text = `$(sync~spin) Symbol: Indexing (${this.indexProgress}%)`;
-            this.statusBarItem.show();
-            return;
-        }
-
-        if (this.lspStatus === 'timeout') {
-            this.statusBarItem.text = '$(warning) Symbol: LSP Timeout';
-            this.statusBarItem.tooltip = 'Language Server Protocol failed to respond. Some features may be limited.';
-            this.statusBarItem.show();
-            return;
-        }
-
-        // If everything is ready/idle, we can hide it or show a "Ready" state briefly
-        // For now, let's hide it to reduce clutter, or show a static icon
-        // Per SPEC: Standby/Ready: $(database) Symbols: Ready
-        this.statusBarItem.text = '$(database) Symbols: Ready';
-        this.statusBarItem.tooltip = 'Click for Database Actions';
+    private setProgress(command: 'init' | 'sync', percent: number) {
+        this.statusBarItem.text = `$(sync~spin) CodeGraph ${command}: ${percent}%`;
+        this.statusBarItem.tooltip = `Running codegraph ${command} in ${this.codeGraph.workspaceRoot}`;
         this.statusBarItem.show();
     }
 

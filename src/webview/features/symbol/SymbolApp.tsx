@@ -570,7 +570,7 @@ const App: React.FC = () => {
                     value={query}
                     onInput={handleSearch}
                     style={{ width: '100%' }}
-                    disabled={backendStatus === 'loading' || backendStatus === 'timeout'}
+                    disabled={backendStatus === 'loading'}
                 >
                     <span slot="start" className="codicon codicon-search"></span>
                     <span 

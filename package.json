@@ -1,8 +1,8 @@
 {
-  "name": "symbol-relation-window",
-  "displayName": "Symbol & Relation Window",
-  "description": "Source Insight-like symbol navigation, call hierarchy, and reference lookup.",
-  "version": "1.0.3",
+  "name": "codegraph-relation",
+  "displayName": "CodeGraph Relation",
+  "description": "CodeGraph-based symbol navigation, relation exploration, and reference lookup.",
+  "version": "1.1.0",
   "publisher": "ytlee",
   "license": "MIT",
   "author": {
@@ -12,16 +12,17 @@
   "activationEvents": [
     "onView:symbol-window-view",
     "onView:symbol-window-project-view",
-    "onView:relation-window-view"
+    "onView:relation-window-view",
+    "onView:reference-window-view"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Lee20171010/symbol-relation-window"
+    "url": "https://github.com/Lee20171010/codegraph-relation"
   },
   "bugs": {
-    "url": "https://github.com/Lee20171010/symbol-relation-window/issues"
+    "url": "https://github.com/Lee20171010/codegraph-relation/issues"
   },
-  "homepage": "https://github.com/Lee20171010/symbol-relation-window#readme",
+  "homepage": "https://github.com/Lee20171010/codegraph-relation#readme",
   "engines": {
     "vscode": "^1.101.0"
   },
@@ -51,14 +52,14 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "symbol-relation-window-container",
+          "id": "codegraph-relation-container",
           "title": "Window",
           "icon": "$(symbol-structure)"
         }
       ]
     },
     "views": {
-      "symbol-relation-window-container": [
+      "codegraph-relation-container": [
         {
           "type": "webview",
           "id": "symbol-window-view",
@@ -82,6 +83,12 @@
           "id": "all-disabled-view",
           "name": " ",
           "when": "!config.symbolWindow.enable && !config.relationWindow.enable"
+        },
+        {
+          "type": "webview",
+          "id": "reference-window-view",
+          "name": "Reference Window",
+          "when": "config.referenceWindow.enable"
         }
       ]
     },
@@ -296,34 +303,15 @@
       {
         "title": "Window Shared: Settings",
         "properties": {
-          "shared.enableDatabaseMode": {
+          "shared.enableRipgrepFallback": {
             "type": "boolean",
-            "default": true,
-            "description": "Enable Database Mode. Uses a local SQLite database for instant project-wide symbol search."
+            "default": false,
+            "description": "Enable ripgrep text-search fallback. Disabled by default because CodeGraph is the primary index."
           },
-          "shared.database.cacheSizeMB": {
-            "type": "integer",
-            "default": 64,
-            "minimum": 0,
-            "maximum": 1024,
-            "description": "SQLite cache size in Megabytes (MB). Higher values improve search performance but consume more memory. Default is 64MB."
-          },
-          "shared.indexingBatchSize": {
-            "type": "integer",
-            "default": 15,
-            "minimum": 1,
-            "maximum": 200,
-            "description": "Number of files to process in each indexing batch. Range: 1-200. Default is 15."
-          },
-          "shared.includeFiles": {
+          "shared.codeGraphPath": {
             "type": "string",
-            "default": "",
-            "description": "Comma-separated list of glob patterns to include in indexing (e.g. **/*.c, **/*.h). If empty, all files are included."
-          },
-          "shared.excludeFiles": {
-            "type": "string",
-            "default": "**/*.md, **/*.txt, **/*.log, **/*.lock, **/*.map, **/*.pdf, **/*.doc, **/*.docx, **/*.xls, **/*.xlsx, **/*.ppt, **/*.pptx, **/*.png, **/*.jpg, **/*.jpeg, **/*.gif, **/*.bmp, **/*.ico, **/*.svg, **/*.mp3, **/*.mp4, **/*.wav, **/*.zip, **/*.tar, **/*.gz, **/*.7z, **/*.rar, **/*.bin, **/*.exe, **/*.dll, **/*.so, **/*.dylib, **/*.pdb, **/*.obj, **/*.o, **/*.a, **/*.min.js, **/*.min.css",
-            "description": "Comma-separated list of glob patterns to exclude from indexing (e.g. **/*.md). These are applied after .gitignore."
+            "default": "codegraph",
+            "description": "CodeGraph CLI command name or path. The workspace must already contain a .codegraph directory."
           }
         }
       },
@@ -342,7 +330,7 @@
             "enumDescriptions": [
               "Automatically detect based on language ID.",
               "Force C/C++/Java style parsing (extract signature and type).",
-              "Disable parsing (raw LSP name)."
+              "Disable parsing and show raw symbol names."
             ],
             "description": "Controls how symbol names are parsed and displayed."
           },
@@ -379,7 +367,7 @@
           "relationWindow.enableDeepSearch": {
             "type": "boolean",
             "default": true,
-            "description": "Enable Deep Search in Relation Window (uses text scanning when LSP results are insufficient)."
+            "description": "Enable optional ripgrep text-search fallback in Relation Window."
           }
         }
       }
