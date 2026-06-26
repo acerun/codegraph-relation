@@ -4,7 +4,20 @@ A Visual Studio Code extension for browsing symbols, relations, and references f
 
 ## Requirements
 
-- Install the `codegraph` CLI and make it available on `PATH`.
+This extension is a UI on top of the `codegraph` CLI — it does not bundle or install it. **If `codegraph` is not already installed, install it first** by following the official guide:
+
+> 📦 **Install CodeGraph:** https://colbymchenry.github.io/codegraph/getting-started/installation/
+
+After installing, verify the CLI is on your `PATH`:
+
+```powershell
+codegraph --version
+```
+
+If the command is not found, either add CodeGraph to your `PATH` or set `shared.codeGraphPath` to its full path (see [Shared Settings](#shared-settings)).
+
+Then, in the workspace:
+
 - Run `codegraph init` manually in the workspace root before using the extension.
 - The extension only uses CodeGraph when the workspace root contains `.codegraph/`.
 
@@ -25,12 +38,13 @@ codegraph status
 
 ## Basic Usage
 
-1. Open a workspace.
-2. In the workspace root, run `codegraph init`.
-3. Open the CodeGraph Relation activity bar view.
-4. Use `Ctrl+Shift+O` for current-file symbols and `Ctrl+T` for project symbol search.
-5. Use `Shift+Alt+H` to refresh relations for the symbol under the cursor.
-6. Use `Shift+Alt+F12` to look up references.
+1. [Install the `codegraph` CLI](https://colbymchenry.github.io/codegraph/getting-started/installation/) if you don't have it yet, and confirm `codegraph --version` works.
+2. Open a workspace.
+3. In the workspace root, run `codegraph init`.
+4. Open the CodeGraph Relation activity bar view.
+5. Use `Ctrl+Shift+O` for current-file symbols and `Ctrl+T` for project symbol search.
+6. Use `Shift+Alt+H` to refresh relations for the symbol under the cursor.
+7. Use `Shift+Alt+F12` to look up references.
 
 ## Configuration
 

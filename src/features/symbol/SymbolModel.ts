@@ -19,7 +19,6 @@ export class SymbolModel {
 
     public async findSymbolsByTextSearch(
         query: string,
-        keywords: string[],
         token?: vscode.CancellationToken,
         scopePath?: string,
         includePattern?: string,
@@ -35,7 +34,6 @@ export class SymbolModel {
         }
 
         const results = await this.codeGraph.searchSymbols(query, 500);
-        const lowerKeywords = keywords.map(keyword => keyword.toLowerCase());
         return results.filter(item => {
             if (token?.isCancellationRequested) {
                 return false;
@@ -49,8 +47,7 @@ export class SymbolModel {
                 return false;
             }
 
-            const haystack = `${item.name} ${item.detail} ${item.path || ''}`.toLowerCase();
-            return lowerKeywords.every(keyword => haystack.includes(keyword));
+            return true;
         }).map(item => ({ ...item, isDeepSearch: true }));
     }
 }

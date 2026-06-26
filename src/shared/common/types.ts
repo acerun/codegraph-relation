@@ -10,6 +10,7 @@ export interface SymbolItem {
     autoExpand?: boolean;
     isDeepSearch?: boolean;
     path?: string;
+    score?: number; // CodeGraph relevance score (higher = more relevant)
 }
 
 export type SymbolMode = 'current' | 'project';

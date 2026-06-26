@@ -464,6 +464,12 @@ body {
     flex-shrink: 0;
 }
 
+/* Relation Window: show path tight beside the symbol name (short gap) instead of flush right. */
+.relation-item .path {
+    margin-left: 6px;
+    padding-left: 0;
+}
+
 /* Reference Window Styles */
 .reference-container { 
     padding: 0; 

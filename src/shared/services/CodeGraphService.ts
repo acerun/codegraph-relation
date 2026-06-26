@@ -86,8 +86,7 @@ export class CodeGraphService {
         }
 
         const output = await this.execCodeGraph(['query', query, '-p', root, '--json', '-l', String(limit)], root);
-        const parsed = JSON.parse(output) as CodeGraphSearchResult[];
-        const items = CodeGraphService.mapQueryResults(parsed, root);
+        const items = CodeGraphService.mapQueryResults(JSON.parse(output) as CodeGraphSearchResult[], root);
         this.log(`searchSymbols "${query}" -> ${items.length} items`);
         return items;
     }
@@ -278,9 +277,11 @@ export class CodeGraphService {
 
     public static mapQueryResults(results: CodeGraphSearchResult[], workspaceRoot: string): SymbolItem[] {
         return results
-            .map(result => result.node)
-            .filter((node): node is CodeGraphNode => !!node?.name && !!node.filePath)
-            .map(node => CodeGraphService.nodeToSymbolItem(node, workspaceRoot));
+            .filter(result => !!result.node?.name && !!result.node.filePath)
+            .map(result => ({
+                ...CodeGraphService.nodeToSymbolItem(result.node!, workspaceRoot),
+                score: result.score
+            }));
     }
 
     public static parseFileSymbols(output: string, workspaceRoot: string, filePath: string): SymbolItem[] {
@@ -461,14 +462,23 @@ export class CodeGraphService {
         console.log(`[CodeGraph Relation] ${message}`);
     }
 
+    // On Windows shell:true is required to launch the codegraph.cmd shim, but the
+    // shell then re-splits the joined command line on whitespace. Quote args that
+    // contain spaces (multi-word queries, paths) so they stay a single argument.
+    private static readonly useShell = process.platform === 'win32';
+    private static quoteArgs(args: string[]): string[] {
+        return CodeGraphService.useShell ? args.map(arg => (/\s/.test(arg) ? `"${arg}"` : arg)) : args;
+    }
+
     private execCodeGraph(args: string[], cwd: string): Promise<string> {
         return new Promise((resolve, reject) => {
             const command = vscode.workspace.getConfiguration('shared').get<string>('codeGraphPath', 'codegraph');
-            this.log(`${command} ${args.join(' ')}`);
-            cp.execFile(command, args, {
+            const execArgs = CodeGraphService.quoteArgs(args);
+            this.log(`${command} ${execArgs.join(' ')}`);
+            cp.execFile(command, execArgs, {
                 cwd,
                 maxBuffer: 1024 * 1024 * 20,
-                shell: process.platform === 'win32'
+                shell: CodeGraphService.useShell
             }, (error, stdout, stderr) => {
                 if (error) {
                     const message = stderr || stdout || error.message;
@@ -484,11 +494,12 @@ export class CodeGraphService {
     private execCodeGraphStreaming(args: string[], cwd: string, onProgress?: (percent: number) => void): Promise<void> {
         return new Promise((resolve, reject) => {
             const command = vscode.workspace.getConfiguration('shared').get<string>('codeGraphPath', 'codegraph');
-            this.log(`${command} ${args.join(' ')}`);
+            const execArgs = CodeGraphService.quoteArgs(args);
+            this.log(`${command} ${execArgs.join(' ')}`);
 
-            const child = cp.spawn(command, args, {
+            const child = cp.spawn(command, execArgs, {
                 cwd,
-                shell: process.platform === 'win32'
+                shell: CodeGraphService.useShell
             });
             let output = '';
 

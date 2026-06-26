@@ -277,16 +277,6 @@ export class SymbolController {
                         allSymbols = allSymbols.filter(symbol => kinds.includes(symbol.kind));
                     }
 
-                    // Client-side Filtering: Ensure result matches ALL keywords
-                    if (keywords.length > 1) {
-                        const lowerKeywords = keywords.map(k => k.toLowerCase());
-                        allSymbols = allSymbols.filter(s => {
-                            const name = s.name.toLowerCase();
-                            const container = (s.detail || '').toLowerCase(); 
-                            return lowerKeywords.every(k => name.includes(k) || container.includes(k));
-                        });
-                    }
-
                     allSymbols = this.sortSymbols(allSymbols, query);
 
                     this.allSearchResults = allSymbols;
@@ -377,8 +367,7 @@ export class SymbolController {
 
         try {
             const textSearchResults = await this.model.findSymbolsByTextSearch(
-                this.currentQuery, 
-                keywords, 
+                this.currentQuery,
                 this.searchCts?.token,
                 this.currentScopePath,
                 this.currentIncludePattern
@@ -500,11 +489,16 @@ export class SymbolController {
             if (aExact && !bExact) { return -1; }
             if (!aExact && bExact) { return 1; }
 
-            // 2. Length (Shortest First)
+            // 2. CodeGraph relevance score (higher first), when available
+            if (a.score !== undefined && b.score !== undefined && a.score !== b.score) {
+                return b.score - a.score;
+            }
+
+            // 3. Length (Shortest First)
             const lenDiff = aName.length - bName.length;
             if (lenDiff !== 0) { return lenDiff; }
 
-            // 3. Alphabetical
+            // 4. Alphabetical
             return aName.localeCompare(bName);
         });
     }

@@ -837,11 +837,12 @@ export class RelationController {
                     
                     const children = Array.from(childrenMap.values());
                     if (changed || shouldPublishResolvedChildren(hasPublishedUpdate, children)) {
-                        await this.prefetchChildren(children, direction, token);
                         if (cachedRelationItem) {
                             applyPrefetchedChildren(cachedRelationItem, children);
                         }
                         this.registerRelationItems(children);
+                        // Render the expanded node now; grandchildren are prefetched in
+                        // the background after both fetch tasks settle (see below).
                         this.webviewProvider.postMessage({
                             command: 'updateNode',
                             itemId: itemId,
@@ -862,6 +863,10 @@ export class RelationController {
                 });
 
                 await Promise.allSettled([codeGraphTask, deepSearchTask]);
+
+                // Background: warm the grandchildren cache so the next expand is instant.
+                // Not awaited — the expanded level is already on screen.
+                void this.prefetchChildren(Array.from(childrenMap.values()), direction, token);
             } finally {
                 this.webviewProvider.postMessage({ command: 'setLoading', isLoading: false });
 
@@ -937,8 +942,9 @@ export class RelationController {
             
             if (changed) {
                 const children = Array.from(childrenMap.values());
-                await this.prefetchChildren(children, direction, token);
                 this.registerRelationItems(children);
+                // Render the children immediately; prefetch of grandchildren happens
+                // in the background after the final result is assembled (see below).
                 onUpdate(children);
             }
         };
@@ -959,20 +965,113 @@ export class RelationController {
         await Promise.allSettled([codeGraphTask, deepSearchTask]);
 
         if (token.isCancellationRequested) {return [];}
-        
+
         if (!suppressLoading) {
             this.webviewProvider.postMessage({ command: 'setLoading', isLoading: false });
         }
 
         const children = Array.from(childrenMap.values());
-        await this.prefetchChildren(children, direction, token);
         this.registerRelationItems(children);
+        // Background: warm the grandchildren cache so the next expand is instant.
+        // Not awaited — the current level is already on screen.
+        void this.prefetchChildren(children, direction, token);
         return children;
     }
 
     private getCleanName(name: string): string {
         const match = name.match(/[a-zA-Z0-9_]+/);
         return match ? match[0] : name;
+    }
+
+    /**
+     * Sort items so that those matching the current root symbol name come first.
+     */
+    private sortByRootMatch(items: RelationItem[]): RelationItem[] {
+        let rootName = '';
+        if (this.currentRoot && typeof this.currentRoot !== 'string') {
+            rootName = this.currentRoot.name;
+        }
+        if (!rootName) { return items; }
+
+        const cleanRootName = this.getCleanName(rootName);
+        const matches: RelationItem[] = [];
+        const others: RelationItem[] = [];
+        for (const item of items) {
+            const cachedItem = this.itemCache.get(item.id);
+            const name = cachedItem ? cachedItem.name : item.name;
+            if (this.getCleanName(name) === cleanRootName) {
+                matches.push(item);
+            } else {
+                others.push(item);
+            }
+        }
+        return [...matches, ...others];
+    }
+
+    /**
+     * Estimate a function's body end line by brace matching from its start line.
+     * CodeGraph only reports a symbol's definition (start) line, so we scan the
+     * open document forward until the opening brace's matching close. Used to
+     * bound the call-site search to the function body. Heuristic but local and
+     * cheap (no extra CodeGraph calls); braces inside strings/comments may skew
+     * it slightly, which is acceptable for locating a call site.
+     */
+    private findBodyEndLine(doc: vscode.TextDocument, startLine: number): number {
+        const maxScan = Math.min(doc.lineCount - 1, startLine + 600);
+        let depth = 0;
+        let seenOpen = false;
+        for (let line = startLine; line <= maxScan; line++) {
+            const text = doc.lineAt(line).text;
+            for (let i = 0; i < text.length; i++) {
+                const ch = text[i];
+                if (ch === '{') { depth++; seenOpen = true; }
+                else if (ch === '}') {
+                    depth--;
+                    if (seenOpen && depth <= 0) { return line; }
+                }
+            }
+        }
+        return seenOpen ? maxScan : startLine;
+    }
+
+    /** Build a range spanning a function body, given its start line in a document. */
+    private bodyRange(doc: vscode.TextDocument, startLine: number): vscode.Range {
+        const endLine = this.findBodyEndLine(doc, startLine);
+        return new vscode.Range(startLine, 0, endLine, Number.MAX_SAFE_INTEGER);
+    }
+
+    /**
+     * Find call sites for symbol names within a range of a text document.
+     * Returns a map from cleaned symbol name to call-site range.
+     */
+    private findCallSitesBulk(names: string[], doc: vscode.TextDocument, range: vscode.Range): Map<string, vscode.Range> {
+        const result = new Map<string, vscode.Range>();
+        const nameSet = new Set(names.map(n => this.getCleanName(n)).filter(Boolean));
+        if (nameSet.size === 0) { return result; }
+
+        for (let line = range.start.line; line <= range.end.line && line < doc.lineCount; line++) {
+            const lineText = doc.lineAt(line).text;
+            for (const cleanName of nameSet) {
+                if (result.has(cleanName)) { continue; }
+                let idx = 0;
+                while (idx < lineText.length) {
+                    const found = lineText.indexOf(cleanName, idx);
+                    if (found < 0) { break; }
+
+                    // Word boundary check
+                    const before = found > 0 ? lineText[found - 1] : ' ';
+                    if (/\w/.test(before)) { idx = found + 1; continue; }
+                    const after = found + cleanName.length < lineText.length ? lineText[found + cleanName.length] : ' ';
+                    if (/\w/.test(after)) { idx = found + 1; continue; }
+
+                    result.set(cleanName, new vscode.Range(line, found, line, found + cleanName.length));
+                    break; // Found for this name, move to next name
+                }
+            }
+            // Early exit when all names have been found
+            if (result.size === nameSet.size) { break; }
+        }
+        return result;
     }
 
     private async prefetchChildren(
@@ -1031,12 +1130,30 @@ export class RelationController {
             activeFilter = direction === 'incoming' ? this.incomingFilter : this.outgoingFilter;
         }
 
+        // Cache file reads so we don't open the same file repeatedly (shared by both directions)
+        const docCache = new Map<string, vscode.TextDocument | undefined>();
+        const getDoc = async (uri: vscode.Uri): Promise<vscode.TextDocument | undefined> => {
+            const k = uri.toString();
+            if (!docCache.has(k)) {
+                try { docCache.set(k, await vscode.workspace.openTextDocument(uri)); }
+                catch { docCache.set(k, undefined); }
+            }
+            return docCache.get(k);
+        };
+
         if (direction === 'incoming') {
             const calls = await this.model.getIncomingCalls(item);
             if (token?.isCancellationRequested) {return [];}
-            
+
             // Deduplicate by unique key (uri + range)
             const uniqueItems = new Map<string, RelationItem>();
+            const rootName = item.name;
+            const cleanRoot = this.getCleanName(rootName);
+
+            // Pre-open the distinct caller files concurrently to warm the cache, so the
+            // per-call scan below isn't serialized one openTextDocument at a time.
+            await Promise.all([...new Set(calls.map(c => c.from.uri.toString()))]
+                .map(u => getDoc(vscode.Uri.parse(u))));
 
             let processCount = 0;
             for (const call of calls) {
@@ -1055,7 +1172,20 @@ export class RelationController {
                     if (!uniqueItems.has(key)) {
                         const subId = uuidv4();
                         this.itemCache.set(subId, call.from);
-                        const { name, detail, path } = this.formatItemInfo(call.from.name, call.from.detail || '', call.from.kind, call.from.uri, range.start.line);
+
+                        // Try to find the actual call site — where this caller invokes
+                        // the root symbol — inside the caller's body.  CodeGraph only
+                        // reports the caller's definition line, so we expand it to the
+                        // full body range and scan that for the call. Fall back to the
+                        // definition if the file is unreadable or no match is found.
+                        const doc = await getDoc(call.from.uri);
+                        const callSite = doc
+                            ? this.findCallSitesBulk([rootName], doc, this.bodyRange(doc, call.from.range.start.line)).get(cleanRoot)
+                            : undefined;
+                        const pathUri = call.from.uri;
+                        const pathLine = callSite ? callSite.start.line : range.start.line;
+
+                        const { name, detail, path } = this.formatItemInfo(call.from.name, call.from.detail || '', call.from.kind, pathUri, pathLine);
                         uniqueItems.set(key, {
                             id: subId,
                             name: name,
@@ -1063,8 +1193,8 @@ export class RelationController {
                             path: path,
                             kind: call.from.kind,
                             uri: call.from.uri.toString(),
-                            range: range,
-                            selectionRange: call.from.selectionRange,
+                            range: callSite || range,
+                            selectionRange: callSite || call.from.selectionRange,
                             hasChildren: true
                         });
                     }
@@ -1072,34 +1202,7 @@ export class RelationController {
             }
             
             const results = Array.from(uniqueItems.values());
-            
-            // Sort: Root name match first
-            let rootName = '';
-            if (this.currentRoot && typeof this.currentRoot !== 'string') {
-                rootName = this.currentRoot.name;
-            }
-
-            if (rootName) {
-                const matches: RelationItem[] = [];
-                const others: RelationItem[] = [];
-                
-                const cleanRootName = this.getCleanName(rootName);
-
-                for (const item of results) {
-                    const cachedItem = this.itemCache.get(item.id);
-                    const name = cachedItem ? cachedItem.name : item.name;
-                    const cleanName = this.getCleanName(name);
-                    
-                    if (cleanName === cleanRootName) {
-                        matches.push(item);
-                    } else {
-                        others.push(item);
-                    }
-                }
-                return [...matches, ...others];
-            }
-
-            return results;
+            return this.sortByRootMatch(results);
         } else {
             const calls = await this.model.getOutgoingCalls(item);
             if (token?.isCancellationRequested) {return [];}
@@ -1121,45 +1224,62 @@ export class RelationController {
                     defs.get(defKey)!.push({ call, range });
                 }
             }
+
+            // Try to find real call sites (where item calls each callee) inside item's body.
+            // CodeGraph only reports callee definitions — so we scan the root function text.
+            const callSiteByDef = new Map<string, vscode.Range>();
+            const rootDoc = grouped.size > 0 ? await getDoc(item.uri) : undefined;
+            if (rootDoc) {
+                const bulk = this.findCallSitesBulk(Array.from(grouped.keys()), rootDoc, this.bodyRange(rootDoc, item.range.start.line));
+                // grouped is keyed by callee name, so map each call site straight onto its defs
+                for (const [name, defs] of grouped) {
+                    const range = bulk.get(this.getCleanName(name));
+                    if (!range) { continue; }
+                    for (const defKey of defs.keys()) {
+                        callSiteByDef.set(defKey, range);
+                    }
+                }
+            }
             
             for (const [name, defs] of grouped) {
-                const defList = Array.from(defs.values());
-                const isAmbiguous = defList.length > 1;
-                
-                defList.forEach((callSites, index) => {
+                const defEntries = Array.from(defs.entries());
+                const isAmbiguous = defEntries.length > 1;
+
+                defEntries.forEach(([defKey, callSites], index) => {
                     const sitesToShow = this.currentSettings.removeDuplicate ? [callSites[0]] : callSites;
-                    
-                    for (const { call, range } of sitesToShow) {
+
+                    for (const { call } of sitesToShow) {
                         const subId = uuidv4();
                         this.itemCache.set(subId, call.to);
-                        
-                        let pathUri = item.uri; // Call Site Source
-                        let pathLine = range.start.line; // Call Site Line
-                        
-                        if (this.currentSettings.showDefinitionPath) {
-                            pathUri = call.to.uri;
-                            pathLine = call.to.range.start.line;
-                        }
-                        
+
+                        // callSite: where in the root function body this callee is invoked (for jump navigation)
+                        const callSite = callSiteByDef.get(defKey);
+
+                        // Path shows where the root function invokes this callee (the
+                        // call site). Fall back to the callee's definition when the call
+                        // site can't be located. The definition stays reachable via
+                        // targetUri/targetRange (Jump to Definition).
+                        const pathUri = callSite ? item.uri : call.to.uri;
+                        const pathLine = callSite ? callSite.start.line : call.to.range.start.line;
                         const { name: fmtName, detail, path } = this.formatItemInfo(call.to.name, call.to.detail || '', call.to.kind, pathUri, pathLine, call.to.uri);
-                        
+
                         let displayName = fmtName;
                         if (isAmbiguous) {
-                            displayName = `${fmtName} (${index + 1}/${defList.length})`;
+                            displayName = `${fmtName} (${index + 1}/${defEntries.length})`;
                         }
-                        
+
                         results.push({
                             id: subId,
                             name: displayName,
                             detail: detail,
                             path: path,
                             kind: call.to.kind,
-                            uri: item.uri.toString(), // Jump to Call Site
+                            uri: (callSite ? item.uri : call.to.uri).toString(),
                             targetUri: call.to.uri.toString(),
                             targetRange: call.to.range,
                             targetSelectionRange: call.to.selectionRange,
-                            range: range,
-                            selectionRange: range,
+                            range: callSite || call.to.selectionRange,
+                            selectionRange: callSite || call.to.selectionRange,
                             hasChildren: true,
                             isDeepSearch: false
                         });
@@ -1167,31 +1287,7 @@ export class RelationController {
                 });
             }
 
-            // Sort: Root name match first
-            let rootName = '';
-            if (this.currentRoot && typeof this.currentRoot !== 'string') {
-                rootName = this.currentRoot.name;
-            }
-
-            if (rootName) {
-                const matches: RelationItem[] = [];
-                const others: RelationItem[] = [];
-                
-                const cleanRootName = this.getCleanName(rootName);
-
-                for (const item of results) {
-                    const cachedItem = this.itemCache.get(item.id);
-                    const name = cachedItem ? cachedItem.name : item.name;
-                    const cleanName = this.getCleanName(name);
-                    
-                    if (cleanName === cleanRootName) {
-                        matches.push(item);
-                    } else {
-                        others.push(item);
-                    }
-                }
-                return [...matches, ...others];
-            }
+            return this.sortByRootMatch(results);
         }
         return results;
     }
@@ -1252,32 +1348,7 @@ export class RelationController {
                 }
             }
             deepItems = Array.from(uniqueItems.values());
-
-            // Sort: Root name match first
-            let rootName = '';
-            if (this.currentRoot && typeof this.currentRoot !== 'string') {
-                rootName = this.currentRoot.name;
-            }
-
-            if (rootName) {
-                const matches: RelationItem[] = [];
-                const others: RelationItem[] = [];
-                
-                const cleanRootName = this.getCleanName(rootName);
-
-                for (const item of deepItems) {
-                    const cachedItem = this.itemCache.get(item.id);
-                    const name = cachedItem ? cachedItem.name : item.name;
-                    const cleanName = this.getCleanName(name);
-                    
-                    if (cleanName === cleanRootName) {
-                        matches.push(item);
-                    } else {
-                        others.push(item);
-                    }
-                }
-                deepItems = [...matches, ...others];
-            }
+            deepItems = this.sortByRootMatch(deepItems);
         } else {
             const calls = await this.model.getDeepOutgoingCalls(item, token, activeFilter);
             if (token?.isCancellationRequested) {return [];}
@@ -1350,31 +1421,7 @@ export class RelationController {
                 });
             }
 
-            // Sort: Root name match first
-            let rootName = '';
-            if (this.currentRoot && typeof this.currentRoot !== 'string') {
-                rootName = this.currentRoot.name;
-            }
-
-            if (rootName) {
-                const matches: RelationItem[] = [];
-                const others: RelationItem[] = [];
-                
-                const cleanRootName = this.getCleanName(rootName);
-
-                for (const item of deepItems) {
-                    const cachedItem = this.itemCache.get(item.id);
-                    const name = cachedItem ? cachedItem.name : item.name;
-                    const cleanName = this.getCleanName(name);
-                    
-                    if (cleanName === cleanRootName) {
-                        matches.push(item);
-                    } else {
-                        others.push(item);
-                    }
-                }
-                deepItems = [...matches, ...others];
-            }
+            deepItems = this.sortByRootMatch(deepItems);
         }
         
         return deepItems;

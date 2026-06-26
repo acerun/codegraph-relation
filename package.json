@@ -2,11 +2,11 @@
   "name": "codegraph-relation",
   "displayName": "CodeGraph Relation",
   "description": "CodeGraph-based symbol navigation, relation exploration, and reference lookup.",
-  "version": "1.1.0",
-  "publisher": "ytlee",
+  "version": "1.1.1",
+  "publisher": "runm",
   "license": "MIT",
   "author": {
-    "name": "ytlee",
+    "name": "runm",
     "url": "https://github.com/Lee20171010"
   },
   "activationEvents": [
