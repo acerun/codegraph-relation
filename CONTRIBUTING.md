@@ -1,135 +1,134 @@
-# Contributing to Symbol Window
+# Contributing to CodeGraph Relation
 
-Thank you for your interest in contributing to Symbol Window! We welcome bug reports, feature requests, and pull requests.
+Thanks for helping improve CodeGraph Relation. This project is a VS Code extension that uses an existing CodeGraph index for symbol navigation, relation exploration, and reference lookup.
+
+## Runtime Principles
+
+- CodeGraph is the primary index source.
+- Users run `codegraph init` and `codegraph sync` manually.
+- The extension must not automatically initialize or rebuild CodeGraph.
+- If `.codegraph/` is missing, show a missing/unavailable state.
+- Do not reintroduce runtime LSP indexing or the old SQLite symbol database.
+- Keep implementation simple and close to existing feature boundaries.
 
 ## Development Setup
 
-1.  **Prerequisites**:
-    - Node.js (v16 or higher)
-    - npm
-    - Visual Studio Code
+Prerequisites:
 
-2.  **Clone the repository**:
-    ```bash
-    git clone https://github.com/Lee20171010/symbol-relation-window.git
-    cd symbol-relation-window
-    ```
+- Node.js
+- npm
+- Visual Studio Code
+- CodeGraph CLI on `PATH`
 
-3.  **Install dependencies**:
-    ```bash
-    npm install
-    ```
+Setup:
 
-4.  **Run the extension**:
-    - Open the project in VS Code.
-    - Press `F5` to start debugging. This will open a new "Extension Development Host" window with the extension loaded.
+```powershell
+git clone https://github.com/acerun/codegraph-relation.git
+cd codegraph-relation
+npm install
+```
 
-### Cross-Platform Development (WSL/Windows)
-If you are developing on Windows or WSL, please adhere to the following path handling guidelines:
--   **Internal Logic**: Use `fsPath` for tools like `ripgrep` or `sqlite`.
--   **External API**: Use `vscode.Uri` for Webviews and VS Code APIs.
--   **Path Joining**: Use `vscode.Uri.joinPath` instead of `path.join` when dealing with URIs to avoid separator issues (`\` vs `/`).
+For extension debugging:
+
+1. Open this repository in VS Code.
+2. Press `F5`.
+3. In the Extension Development Host, open a workspace that already has `.codegraph/`, or run `codegraph init` manually in that workspace.
 
 ## Project Structure
 
-The codebase follows a modular MVC-like pattern. Here is the breakdown of the folder structure and the responsibilities of key components:
-
-```
+```text
 src/
-├── extension.ts                       // Entry point: Activates features, registers commands.
-├── features/                          // Feature Modules
-│   ├── <feature>/                     // Standard Pattern (e.g., relation, reference)
-│   │   ├── *Controller.ts             // Logic: Orchestrates events, updates, and mode switching.
-│   │   ├── *Model.ts                  // Data: Fetches information from LSP, Database, or Search.
-│   │   └── *WebviewProvider.ts        // UI Backend: Manages the Webview panel and IPC messages.
-│   │
-│   └── symbol/                        // Symbol Window Specifics
-│       ├── indexer/                   // Background Indexer: Scans workspace files into SQLite.
-│       └── parsing/                   // Parsing Strategies: Cleans symbol names (e.g., removing C++ params).
-│
-├── shared/                            // Shared Infrastructure
-│   ├── common/                        // Shared Types and Constants.
-│   ├── db/                            // Database Layer: SQLite schema and query methods.
-│   ├── services/                      // Core Services: Singletons like LspClient and DatabaseManager.
-│   ├── ui/                            // Shared UI Logic (e.g. GlobalStatusBar).
-│   └── utils/                         // Utilities: Search Engine (Ripgrep), Navigation, etc.
-│
-└── webview/                           // Frontend Application (React)
-    ├── components/                    // Shared React Components (e.g. FilterView).
-    ├── features/                      // Feature-specific UI Modules.
-    │   └── <feature>/                 // e.g. symbol, relation
-    │       ├── index.tsx              // Entry point: Mounts the React app.
-    │       ├── *App.tsx               // Main Component: Handles state and messages.
-    │       └── *Tree.tsx              // Presentation: Renders the tree/list view.
-    ├── global.d.ts                    // TypeScript definitions for Webview context.
-    ├── utils.ts                       // Frontend utilities (e.g. message passing).
-    └── vscode-api.ts                  // API Wrapper: Typed wrapper for VS Code Webview API.
+├── extension.ts
+├── features/
+│   ├── symbol/
+│   ├── relation/
+│   ├── reference/
+│   └── placeholder/
+├── shared/
+│   ├── services/CodeGraphService.ts
+│   ├── ui/GlobalStatusBar.ts
+│   ├── common/
+│   └── utils/
+├── webview/
+└── test/
 ```
 
-## Build & Packaging
+Key files:
 
-### Compilation
-To compile the project manually:
+- `src/shared/services/CodeGraphService.ts`: central CodeGraph CLI wrapper.
+- `src/features/symbol/SymbolModel.ts`: symbol data access.
+- `src/features/relation/RelationModel.ts`: relation data access.
+- `src/shared/ui/GlobalStatusBar.ts`: CodeGraph readiness and actions.
+- `src/webview/features/*`: React webview UIs.
 
-```bash
+## CodeGraph CLI Contract
+
+Runtime calls should stay centralized in `CodeGraphService`.
+
+Supported calls:
+
+```powershell
+codegraph status <path>
+codegraph files -p <path> --json
+codegraph query <search> -p <path> --json -l <limit>
+codegraph node -p <path> -f <file> <file> --symbols-only
+codegraph callers <symbol> -p <path> --json -l <limit>
+codegraph callees <symbol> -p <path> --json -l <limit>
+```
+
+Do not scatter direct CodeGraph process calls through feature controllers or webviews.
+
+## Windows and Path Handling
+
+- Use PowerShell for repository commands.
+- Use `vscode.Uri` when communicating with VS Code APIs and webviews.
+- Use `fsPath` only for filesystem or CLI operations.
+- Convert relative CodeGraph paths with `/` separators when passing file paths to CodeGraph.
+- Be careful with Windows command shims such as `codegraph.cmd`.
+
+## Development Commands
+
+```powershell
+npm run check-types
+npm run lint
 npm run compile
 ```
 
-To watch for changes:
+Packaging:
 
-```bash
-npm run watch
+```powershell
+npx @vscode/vsce package
 ```
 
-### Cross-Platform Packaging
-This extension uses a custom build script to handle cross-platform packaging of `ripgrep` binaries.
+Optional tests:
 
-**Standard Development:**
-For local development, simply run:
-```bash
-npm install
-```
-This will automatically download the `ripgrep` binary for your current platform via the standard `@vscode/ripgrep` post-install script.
-
-**Packaging for Release:**
-To package the extension for a specific platform (or all platforms), use the provided script. This script dynamically downloads the correct `ripgrep` binary from GitHub Releases and bundles it into the VSIX, allowing you to build for Linux/macOS even from a Windows machine.
-
-```bash
-# Package for current platform
-npm run package:target
-
-# Package for a specific target
-node scripts/platform-publish.js package linux-x64
-node scripts/platform-publish.js package darwin-arm64
-```
-
-### Publishing
-To publish the extension to the VS Code Marketplace, you can use the same script with the `publish` action. This will package the extension for the specified target and immediately publish it.
-
-```bash
-# Publish for current platform
-npm run publish:target -- -p <YOUR_TOKEN>
-
-# Publish for a specific target
-node scripts/platform-publish.js publish linux-x64 -p <YOUR_TOKEN>
-node scripts/platform-publish.js publish darwin-arm64 -p <YOUR_TOKEN>
-```
-
-## Testing
-
-We use `@vscode/test-electron` for integration tests.
-
-```bash
+```powershell
 npm test
 ```
 
-See `TEST.md` for the manual test plan.
+`npm test` launches VS Code extension tests and can be affected by local VS Code runner or ESM import-resolution behavior. Always run typecheck, lint, and compile before submitting.
 
-## Code Style
+## Documentation
 
-- We use **ESLint** for linting. Please ensure your code passes linting before submitting a PR.
-- Keep code comments and documentation in **English**.
+When behavior changes, update:
+
+- `README.md` for user-facing usage
+- `SPEC.md` for architecture and feature contracts
+- `TEST.md` for manual verification
+- `CHANGELOG.md` for release notes
+
+Screenshots used by the README live under `media/Common`.
+
+## Pull Request Checklist
+
+- [ ] The change keeps CodeGraph as the primary runtime source.
+- [ ] The extension does not run `codegraph init` or `codegraph sync` without explicit user action.
+- [ ] Missing `.codegraph/` is handled gracefully.
+- [ ] Typecheck passes.
+- [ ] Lint passes.
+- [ ] Compile passes.
+- [ ] Documentation and tests are updated when behavior changes.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under its MIT License.
+By contributing, you agree that your contributions are licensed under the MIT License.

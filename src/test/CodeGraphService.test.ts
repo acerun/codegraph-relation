@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { CodeGraphService } from '../shared/services/CodeGraphService.js';
+import { normalizeAutoSyncDebounceMs, shouldAutoSync } from '../shared/services/CodeGraphAutoSync.js';
 import { RelationItem } from '../shared/common/types.js';
 import { applyPrefetchedChildren, shouldPublishResolvedChildren } from '../features/relation/relationCache.js';
 
@@ -98,6 +99,22 @@ suite('CodeGraphService Test Suite', () => {
         assert.strictEqual(shouldPublishResolvedChildren(false, []), true);
         assert.strictEqual(shouldPublishResolvedChildren(true, []), false);
         assert.strictEqual(shouldPublishResolvedChildren(false, [createRelationItem('child')]), false);
+    });
+
+    test('auto sync only runs when enabled, indexed, and idle', () => {
+        assert.strictEqual(shouldAutoSync({ enabled: false, hasIndex: true, isRunning: false }), 'disabled');
+        assert.strictEqual(shouldAutoSync({ enabled: true, hasIndex: false, isRunning: false }), 'missing-index');
+        assert.strictEqual(shouldAutoSync({ enabled: true, hasIndex: true, isRunning: true }), 'busy');
+        assert.strictEqual(shouldAutoSync({ enabled: true, hasIndex: true, isRunning: false, isActive: false }), 'disabled');
+        assert.strictEqual(shouldAutoSync({ enabled: true, hasIndex: true, isRunning: false }), 'run');
+        assert.strictEqual(shouldAutoSync({ enabled: true, hasIndex: true, isRunning: false, isActive: true }), 'run');
+    });
+
+    test('auto sync debounce defaults to the maximum delay', () => {
+        assert.strictEqual(normalizeAutoSyncDebounceMs(undefined), 30000);
+        assert.strictEqual(normalizeAutoSyncDebounceMs(100), 250);
+        assert.strictEqual(normalizeAutoSyncDebounceMs(60000), 30000);
+        assert.strictEqual(normalizeAutoSyncDebounceMs(2000), 2000);
     });
 });
 

@@ -1,10 +1,25 @@
 # Change Log
 
-All notable changes to the "symbol-relation-window" extension will be documented in this file.
+All notable changes to the "codegraph-relation" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
 ## [Unreleased]
+
+## [1.1.1] - 2026-06-28
+
+### Changed
+- Rewrote README around practical usage, CodeGraph setup, Project Symbols search, Relation Window, Reference Window, and status bar actions.
+- Updated documentation screenshots to use `media/Common/window.png`, `media/Common/status.png`, and `media/Common/status_list.png`.
+- Refreshed `SPEC.md`, `TEST.md`, and `CONTRIBUTING.md` to match the current CodeGraph CLI architecture.
+- Documented empty Project Symbols behavior: prefer indexed `main.*` files, otherwise show symbols from indexed files.
+- Clarified CodeGraph-backed search behavior, including fuzzy, approximate, pronunciation-close project-symbol queries and relevance-ranked results.
+
+### Added
+- Added `shared.autoSyncOnSave` support, enabled by default, to run debounced `codegraph sync` after saved, created, deleted, or renamed files when an existing `.codegraph/` index is available.
+- Added `shared.autoSyncDebounceMs` with a 30000ms default to tune the automatic sync delay.
+- Limited automatic sync to times when a CodeGraph Relation side-bar view is visible.
+- Renamed the Activity Bar container title from `Window` to `CodeGraph Relation`.
 
 
 ## [1.1.0] - 2026-06-24

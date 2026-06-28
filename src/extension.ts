@@ -10,6 +10,7 @@ import { ReferenceWebviewProvider } from './features/reference/ReferenceWebview'
 import { DisabledWebviewProvider } from './features/placeholder/DisabledWebviewProvider';
 import { GlobalStatusBar } from './shared/ui/GlobalStatusBar';
 import { CodeGraphService } from './shared/services/CodeGraphService';
+import { CodeGraphAutoSync } from './shared/services/CodeGraphAutoSync';
 import * as fs from 'fs';
 import { rgPath } from '@vscode/ripgrep';
 
@@ -67,6 +68,13 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Initialize Global Status Bar
     const globalStatusBar = new GlobalStatusBar(context, codeGraph, refreshCodeGraphViews);
+    const isCodeGraphViewVisible = () => Boolean(
+        provider?.isVisible
+        || projectProvider?.isVisible
+        || relationProvider?.isVisible()
+        || referenceProvider?.isVisible()
+    );
+    context.subscriptions.push(new CodeGraphAutoSync(codeGraph, refreshCodeGraphViews, isCodeGraphViewVisible));
 
     const initSymbolWindow = () => {
         const config = vscode.workspace.getConfiguration('symbolWindow');

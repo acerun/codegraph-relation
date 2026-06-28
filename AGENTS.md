@@ -92,12 +92,12 @@ src/
 
 ## Verification
 
-Use PowerShell commands. This environment expects RTK wrapping:
+Use PowerShell commands. This environment expects wrapping:
 
 ```powershell
-rtk npm run check-types
-rtk npm run lint
-rtk npm run compile
+npm run check-types
+npm run lint
+npm run compile
 ```
 
 Observed result after the CodeGraph migration:
@@ -116,8 +116,8 @@ Observed result after the CodeGraph migration:
 npx @vscode/vsce package
 ```
 
-## PowerShell/RTK Pitfalls
+## PowerShell/Pitfalls
 
-- `rtk` cannot directly execute PowerShell built-ins such as `Get-Content`; use `rtk proxy powershell -NoProfile -Command "..."`.
+- `rtk` cannot directly execute PowerShell built-ins such as `Get-Content`; use `proxy powershell -NoProfile -Command "..."`.
 - When a PowerShell script uses `$variables`, wrap the whole `-Command` script in single quotes or variables may be expanded by the outer shell before PowerShell sees them.
 - Avoid running `codegraph init` in the repo during tests unless the user asked for it. If a temporary `.codegraph/` is created accidentally, remove it before finishing.

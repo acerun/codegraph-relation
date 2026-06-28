@@ -1,302 +1,133 @@
-# Test Plan for Symbol Window Extension
+# Test Plan for CodeGraph Relation
 
-## 1. Toolbar Actions
-- [ ] **Refresh Button**
-    - Click to reload symbols.
-    - **Current Window Mode**: Re-fetches symbols for the active document.
-    - **Project Window Mode**: Clears keyword cache and re-executes the search with the current query.
-    - Verify that the search bar content is preserved and results are updated.
-- [ ] **Toggle Mode Button**
-    - Click to switch between "Current Document" and "Project Workspace" modes.
-    - Verify the UI title changes (e.g., "Current Document" vs "Project Workspace").
-    - Verify the search bar placeholder text changes.
-    - Verify the symbol list updates to reflect the new mode.
+This plan verifies the current CodeGraph-based runtime. Run all terminal commands from the workspace root.
 
-## 2. Navigation & Selection
-- [ ] **Selection State**
-    - Single Click a symbol in the list.
-    - Verify the symbol in the list is selected (highlighted).
-- [ ] **Jump to Definition**
-    - Double Click a symbol in the list.
-    - Verify the editor scrolls to the correct line and column.
-    - Verify the symbol range is highlighted/selected in the editor.
-- [ ] **Keyboard Navigation**
-    - Click inside the symbol list (or search bar).
-    - Use `Arrow Up` / `Arrow Down` to navigate items.
-    - Verify the selection moves up and down.
-    - Press `Enter` to jump to the selected symbol.
-- [ ] **Sync Selection (Editor to List)** (Planned - Not Implemented)
-    - Click on a symbol (e.g., function name) in the active editor.
-    - Verify the corresponding item in the Symbol Window list is automatically selected and scrolled into view.
+## 1. Environment
 
-## 3. Current Symbol Window (Mode: Current)
-- [ ] **Default State**
-    - Open a file (e.g., `.c`, `.cpp`, `.ts`).
-    - Verify all symbols in the file are displayed in a tree structure.
-- [ ] **Readiness State**
-    - Open a large C/C++ project (or simulate slow extension activation).
-    - Verify the view shows a "Waiting for language server..." or similar loading state initially.
-    - Verify it automatically updates to show symbols once the language server is ready.
-- [ ] **Context Switching**
-    - Switch between two open files.
-    - Verify the list updates immediately to show symbols for the newly active file.
-- [ ] **Search/Filtering**
-    - Type in the search bar.
-    - Verify the list is filtered in real-time (Client-side filtering).
-    - Verify parent nodes expand if a child matches the query.
-    - Verify clearing the search bar restores the full list.
-- [ ] **Empty State**
-    - Close all editors.
-    - Verify the list is empty.
-    - Verify no error messages are shown.
-- [ ] **Consistency**
-    - Perform the same search multiple times.
-    - Verify the results are identical each time.
+- [ ] Install CodeGraph and verify `codegraph --version`.
+- [ ] Open a workspace with a real source project.
+- [ ] Run `codegraph init` manually.
+- [ ] Verify `.codegraph/` exists at the workspace root.
+- [ ] Verify the VS Code status bar shows `CodeGraph: Ready`.
+- [ ] Click the status bar item and verify actions for `codegraph init` and `codegraph sync`.
 
-## 4. Project Symbol Window (Mode: Project - Normal Search)
-- [ ] **Default State**
-    - Switch to Project Mode.
-    - Verify the list is initially empty (or shows a prompt to search).
-- [ ] **Smart Search Auto-fill**
-    - Place the cursor on a specific word in an active editor.
-    - Press `Ctrl+T`.
-    - Verify the Symbol Window switches to Project Mode, the search bar is focused, the text is selected (highlighted), populated with the word under the cursor, and a search is immediately triggered.
-- [ ] **Search Functionality**
-    - Type a query (e.g., `main`, `Symbol`).
-    - Verify results are fetched from the workspace.
-    - Verify "No results found" is displayed if the query matches nothing.
-- [ ] **Consistency**
-    - Perform the same search multiple times.
-    - Verify the results are identical each time.
-- [ ] **Instant Search (Cache Verification)**
-    - Type a query (e.g., "Controller") in Project Mode. Note the time it takes to appear (e.g., ~1 second).
-    - Clear the search bar.
-    - Type "Controller" again immediately.
-    - Verify the results appear **instantly** (perceptibly faster than the first time), indicating efficient reuse of data.
+## 2. Missing or Stale Graph
 
-## 5. Deep Search
-- [ ] **Enable Deep Search**
-    - Set `symbolWindow.enableDeepSearch` to `true`.
-    - Switch to Project Mode.
-    - Verify the "Toggle Search Details" (kebab menu) button appears in the search bar.
-- [ ] **Disable Deep Search**
-    - Set `symbolWindow.enableDeepSearch` to `false`.
-    - Switch to Project Mode.
-    - Verify the "Toggle Search Details" button is **hidden**.
-- [ ] **Search Details Panel**
-    - Enable Deep Search and open Project Mode.
-    - Click the "Toggle Search Details" button.
-    - Verify the panel expands showing "Scope" and "files to include".
-    - Click again to collapse.
-- [ ] **Search Scope**
-    - Open Search Details.
-    - Click the folder icon to select a sub-folder in the workspace.
-    - Perform a search.
-    - Verify results are limited to that folder.
-    - Click the "Clear Scope" icon.
-    - Verify scope resets to "Workspace Root".
-- [ ] **Files to Include**
-    - Open Search Details.
-    - Enter a glob pattern (e.g., `*.ts`).
-    - Perform a search.
-    - Verify results only include `.ts` files.
-    - Press `Esc` while focused on the input.
-    - Verify the input is cleared.
-- [ ] **State Persistence**
-    - Set a Scope and Include Pattern.
-    - Reload the window.
-    - Verify Scope and Include Pattern are preserved.
-    - Verify the Details panel open/closed state is preserved.
-- [ ] **Cancel Deep Search**
-    - Trigger a long-running Deep Search (e.g., common keyword in large repo).
-    - Click the "Cancel" button.
-    - Verify the search stops and the loading indicator disappears.
-- [ ] **Results Display**
-    - Verify Deep Search results have a distinct background highlight (to distinguish from standard results).
-    - Verify Deep Search results are collapsed by default.
-    - Verify hovering over a Deep Search result shows a tooltip "Result from Deep Search".
-    - Verify results are relevant (contain the keyword).
-- [ ] **Deduplication**
-    - Ensure symbols already found by the standard search are not duplicated in the Deep Search results.
+- [ ] Open a workspace without `.codegraph/`.
+- [ ] Verify Symbol, Relation, and Reference views show an unavailable or empty state without crashing.
+- [ ] Verify the status bar shows `CodeGraph: Missing`.
+- [ ] Set `shared.codeGraphPath` to an invalid command and verify the error is reported.
+- [ ] Restore `shared.codeGraphPath` to `codegraph`.
 
-## 6. Database Mode (Performance & Indexing)
-- [ ] **Enable Database Mode**
-    - Set `symbolWindow.enableDatabaseMode` to `true` in settings.
-    - Verify the view title changes to **PROJECT WORKSPACE (DATABASE)**.
-- [ ] **Indexing Performance**
-    - Trigger `Rebuild Symbol Index (Full)`.
-    - Verify indexing completes reasonably fast (e.g., < 10s for small projects, < 1m for medium).
-    - Verify the progress bar updates smoothly.
-- [ ] **Incremental Updates**
-    - Create a new file `test_symbol.ts` with a unique class `class TestUniqueSymbol {}`.
-    - Save the file.
-    - Search for `TestUniqueSymbol`.
-    - Verify the new symbol appears in the results.
-    - Delete the file.
-    - Search for `TestUniqueSymbol`.
-    - Verify the symbol is removed from the results.
-- [ ] **Exclude Files**
-    - Add `**/*.ts` to `shared.excludeFiles`.
-    - Rebuild Index
-    - Verify the Extension automatically reloads configuration and no `.ts` symbols appear in search.
-    - Remove the exclusion.
-- [ ] **Include Files**
-    - Set `shared.includeFiles` to `**/*.md`.
-    - Rebuild Index
-    - Verify the Extension automatically retranslates the watcher and ONLY `.md` files are indexed (if they have symbols).
-- [ ] **Persistence**
-    - Index the workspace.
-    - Reload the window (`Developer: Reload Window`).
-    - Perform a search immediately.
-    - Verify results are returned instantly without re-indexing.
-- [ ] **Git Integration (Ignored Files)**
-    - Create a file inside `node_modules` or a folder listed in `.gitignore`.
-    - Verify symbols from this file are **not** indexed or searchable.
+## 3. Symbol Window
 
-## 7. State Management & Synchronization
-- [ ] **File Updates (Data Freshness)**
-    - **Current Mode**:
-        - Modify a symbol in the active file (e.g., rename a function) and **Save**.
-        - Verify the name updates in the list immediately.
-    - **Project Mode**:
-        - Search for a symbol (e.g., `MyFunction`) and verify it appears.
-        - Rename `MyFunction` to `MyFunctionNew` in the editor and **Save** the file.
-        - Without clicking Refresh, search for `MyFunction` again.
-        - Verify it returns **no results** (proving the old data was invalidated).
-        - Search for `MyFunctionNew`.
-        - Verify it is found immediately.
-- [ ] **Readiness Feedback (Project Mode)**
-    - Open the extension in a large workspace (or one where the language server is slow to start).
-    - Verify the view shows a **Loading Indicator** with text "Waiting for symbol provider...".
-    - Verify the search bar is disabled while loading.
-    - Verify the UI automatically unlocks (search bar enabled, loading disappears) when ready.
-- [ ] **Transition Flow**
-    - **Empty to Active (Cold Start)**:
-        - Start with no files open (Empty Workspace).
-        - Verify the Symbol Window is empty and shows no loading spinner (UI is "Ready").
-        - Open a file in a large project (where LSP takes time).
-        - Verify the "Waiting for symbol provider..." loading state appears immediately.
-        - Verify symbols load once the LSP is ready.
-    - **Cold Start Focus (Shortcuts)**:
-        - Ensure all Webview panels are closed or uninitialized.
-        - Press `Ctrl+T` (Project Search) or `Ctrl+Shift+O` (Current Search).
-        - Verify the panel opens successfully and the cursor is immediately focused inside the search input box without any manual clicks.
-    - **Active to Active**:
-        - Open File A. Verify status transitions to Ready and symbols load.
-        - Open File B. Verify status remains Ready (no "Loading" flash) and symbols update.
-- [ ] **Timeout & Retry Feedback**
-    - If the extension stays in "Loading..." for too long (simulated timeout), verify a **"Timeout" or "Error" message** appears (e.g., red text).
-    - Click the **Refresh Button**.
-    - Verify the error message disappears, and the "Loading..." state reappears as it retries.
-- [ ] **"Best Effort" Responsiveness**
-    - Trigger a "Loading" or "Timeout" state in Project Mode (e.g., by opening a huge folder).
-    - Switch to **Current Document Mode**.
-    - Verify the list **immediately** populates with symbols for the active file, ignoring the Project Mode error/loading state.
+- [ ] Open a source file with functions/classes.
+- [ ] Verify Current Document lists symbols from the active file.
+- [ ] Type in the Current Document search box.
+- [ ] Verify matching symbols remain visible and parent nodes expand when children match.
+- [ ] Clear the search box and verify the full current-file outline returns.
+- [ ] Double-click a symbol and verify the editor jumps to its location.
+- [ ] Use `Ctrl+Shift+O` and verify the Current Document search box is focused.
+- [ ] Switch between two files and verify the list updates to the active file.
 
-## 8. Additional Considerations (Edge Cases)
-- [ ] **Manual Refresh**
-    - Perform a search and see results.
-    - Click the **Refresh Button**.
-    - Verify the view briefly flashes or shows a loading state, indicating that a fresh search is being performed against the workspace.
-- [ ] **Pagination / Infinite Scroll** (Project Mode)
-    - Search for a common term (e.g., `e`) that returns > 100 results.
-    - Scroll to the bottom of the list.
-    - Verify more results are loaded automatically.
-- [ ] **Theme Compatibility**
-    - Switch VS Code themes (Light, Dark, High Contrast).
-    - Verify text is readable and selection highlights are visible.
-- [ ] **Extension Activation**
-    - Reload the window (`Developer: Reload Window`) with the view open.
-    - Verify the extension activates and restores the previous mode/state correctly.
+## 4. Project Symbols
 
-## 9. Configuration & Display
-- [ ] **Clean C-Style Types** (`symbolWindow.cleanCStyleTypes`)
-    - **Enabled (Default)**:
-        - Create/Open a C/C++ file with a struct typedef: `typedef struct MyStruct { ... } MyStruct;`
-        - Verify the symbol appears as `MyStruct` in the list.
-        - Verify `(struct)` or `(typedef)` appears in gray text next to the name (Detail).
-    - **Disabled**:
-        - Go to Settings -> Symbol Window -> Uncheck "Clean CStyle Types".
-        - Refresh the view.
-        - Verify the symbol appears as `MyStruct (struct)` (or similar) in the main name text.
-- [ ] **Move Function Signatures** (`symbolWindow.moveSignatureToDetail`)
-    - **Enabled (Default)**:
-        - Create/Open a file with a function: `void myFunction(int a, char b);`
-        - Verify the symbol appears as `myFunction` in the list.
-        - Verify `(int a, char b)` appears in gray text next to the name (Detail).
-    - **Disabled**:
-        - Go to Settings -> Symbol Window -> Uncheck "Move Signature To Detail".
-        - Refresh the view.
-        - Verify the symbol appears as `myFunction(int a, char b)` in the main name text.
-- [ ] **Indexing Batch Size** (`symbolWindow.indexingBatchSize`)
-    - **Default (15)**:
-        - Trigger a full re-index (e.g., delete DB and reload).
-        - Verify indexing proceeds in chunks (observe logs or progress bar).
-    - **Max Limit (200)**:
-        - Set `symbolWindow.indexingBatchSize` to `0` or `300`.
-        - Trigger a full re-index.
-        - Verify indexing proceeds in chunks of 200 (observe logs).
+- [ ] Use `Ctrl+T` with a word selected in the editor.
+- [ ] Verify Project Symbols is focused, filled with the selected word, and searched.
+- [ ] Search `main`.
+- [ ] Verify entry-point or `main.*` related symbols appear when present.
+- [ ] Search a partial name such as `set ref`.
+- [ ] Try an approximate spelling or pronunciation-close term for a known symbol.
+- [ ] Verify CodeGraph can return relevant approximate/fuzzy matches such as `setReferenceController` when indexed.
+- [ ] Search a known exact symbol and verify exact matches rank near the top.
+- [ ] Clear the project query.
+- [ ] Verify default symbols from indexed `main.*` files appear when available.
+- [ ] In a workspace without `main.*`, verify default project symbols still show from indexed files.
+- [ ] Toggle symbol kind filters and verify results are filtered without losing the current query.
+- [ ] Click Refresh and verify the current query is rerun.
 
-## 10. State Persistence & Stability
-- [ ] **Atomic Save Handling**
-    - (Requires external tool or script to simulate atomic save: write new -> rename -> delete old)
-    - Modify a file externally using an editor that performs atomic saves (e.g., Vim, or some configurations of VS Code).
-    - Verify no `ENOENT` errors appear in the "Extension Host" output channel.
-    - Verify the index is updated correctly.
-- [ ] **Empty File Handling**
-    - Create a file `empty.c` with no symbols (just comments or whitespace).
-    - Save the file.
-    - Verify the indexer processes it without error.
-    - Restart VS Code.
-    - Verify the indexer does **not** re-index `empty.c` (it should have been recorded in the DB with 0 symbols).
-- [ ] **UI State Persistence**
-    - **Scenario**: Indexing in Progress.
-        - Trigger a Full Rebuild.
-        - While the progress bar is moving, run `Developer: Reload Window`.
-        - **Verify**: The progress bar reappears and continues (or shows the correct state) after reload.
-    - **Scenario**: Database Mode Label.
-        - Ensure Database Mode is active (Title shows "PROJECT WORKSPACE (DATABASE)").
-        - Switch to the "Source Control" view, then back to "Symbol Window".
-        - **Verify**: The title still shows "PROJECT WORKSPACE (DATABASE)".
-- [ ] **Rebuild Index Commands**
-    - **Incremental**:
-        - Modify a file outside of VS Code (or just save one).
-        - Run `Symbol Window: Rebuild Symbol Index (Incremental)`.
-        - **Verify**: It finishes quickly and updates the index.
-    - **Full**:
-        - Run `Symbol Window: Rebuild Symbol Index (Full)`.
-        - **Verify**: The progress bar starts from 0% and goes to 100%. The database is cleared and repopulated.
-        
-## 11. Relation Window Tests
-- [ ] **Activation & Layout**
-    - Enable `relationWindow.enable`.
-    - Verify "Relation Window" appears in the Side Bar below Symbol Window.
-    - Verify it can be resized.
-- [ ] **Cold Start Focus (Manual Search)**
-    - Ensure the Relation Window panel is closed or uninitialized.
-    - Place the cursor on a valid symbol in an opened file.
-    - Press `Shift+Alt+H` (Manual Search).
-    - Verify the Relation Window opens successfully, automatically executes the search, and the UI correctly focuses/responds without any lost commands.
-- [ ] **Auto-Sync**
-    - Open a file with known functions (e.g., `function A() calls B()`).
-    - Place cursor on `B`.
-    - Verify Relation Window updates to show `A` as a caller (Incoming mode).
-    - Move cursor to whitespace. Verify Window does not clear immediately (or retains last valid state).
-- [ ] **Direction Toggle**
-    - Click "Outgoing Calls".
-    - Verify list shows functions called *by* the current symbol.
-    - Click "Incoming Calls".
-    - Verify list shows functions that *call* the current symbol.
-- [ ] **Navigation**
-    - Double-click a caller in the list.
-    - Verify editor jumps to the location where the call happens.
-- [ ] **Fallback Handling**
-    - Open a file type with no LSP (e.g., Plain Text or a language without extension).
-    - Place cursor on a word.
-    - Verify UI shows "No hierarchy info" or "Deep Search" button.
-    - Click "Deep Search".
-    - Verify it finds text occurrences.
-- [ ] **Resource Release**
-    - Set `relationWindow.enable` to `false`.
-    - Verify the view is hidden or empty.
-    - Verify `onDidChangeTextEditorSelection` listeners are disposed (check logs/performance).
+## 5. Split View
+
+- [ ] Enable `symbolWindow.splitView`.
+- [ ] Verify Current Document and Project Symbols appear as separate views.
+- [ ] Verify each view has its own search box and refresh action.
+- [ ] Disable `symbolWindow.splitView` and verify the single Symbol Window mode returns.
+
+## 6. Relation Window
+
+- [ ] Place the cursor on a function or method with known callers.
+- [ ] Press `Shift+Alt+H`.
+- [ ] Verify Incoming Calls shows caller results from CodeGraph.
+- [ ] Toggle direction.
+- [ ] Verify Outgoing Calls shows callee results from CodeGraph.
+- [ ] Double-click a relation result and verify editor navigation.
+- [ ] Enable `relationWindow.showBothDirections`.
+- [ ] Verify callers and callees are displayed as separate groups.
+- [ ] Enable `relationWindow.autoExpandBothDirections` and verify both groups expand automatically.
+- [ ] Enable `relationWindow.autoSearch`, move the cursor to another symbol, and verify the relation tree updates.
+- [ ] Disable `relationWindow.autoSearch` and verify manual search is required again.
+
+## 7. Reference Window
+
+- [ ] Place the cursor on a symbol with references.
+- [ ] Press `Shift+Alt+F12`.
+- [ ] Verify Reference Window opens in the editor area.
+- [ ] Verify references are grouped and include code context.
+- [ ] Use `F2` and `F1` to navigate next/previous reference.
+- [ ] Double-click or press Enter on a reference and verify editor navigation.
+- [ ] Trigger Lookup References from the editor context menu and verify the same window updates.
+
+## 8. Optional Ripgrep Fallback
+
+- [ ] Keep `shared.enableRipgrepFallback` disabled.
+- [ ] Verify normal symbol and relation flows still use CodeGraph.
+- [ ] Enable `shared.enableRipgrepFallback`.
+- [ ] Search references for a plain text occurrence not represented as a CodeGraph relation.
+- [ ] Verify fallback text results can appear where supported.
+- [ ] Disable the setting again after the test.
+
+## 9. Settings and Enablement
+
+- [ ] Keep default `shared.autoSyncOnSave` enabled in a workspace with `.codegraph/`.
+- [ ] Save, create, rename, or delete a source file.
+- [ ] Verify `codegraph sync` runs after the default 30000ms debounce delay.
+- [ ] Verify the views refresh after sync completes.
+- [ ] Switch the Activity Bar to Explorer.
+- [ ] Save a source file and verify automatic `codegraph sync` is not started.
+- [ ] Move back to CodeGraph Relation and verify later file changes can trigger automatic sync again.
+- [ ] Disable `shared.autoSyncOnSave` and save a file.
+- [ ] Verify no automatic `codegraph sync` is started.
+- [ ] Open a workspace without `.codegraph/`, enable `shared.autoSyncOnSave`, and save a file.
+- [ ] Verify the extension does not run `codegraph init` automatically.
+- [ ] Disable `symbolWindow.enable` and verify Symbol views are hidden.
+- [ ] Disable `relationWindow.enable` and verify Relation Window is hidden.
+- [ ] Disable both Symbol and Relation windows and verify the placeholder/foolproof view appears.
+- [ ] Re-enable both settings.
+- [ ] Disable `referenceWindow.enable` and verify reference commands are unavailable or blocked.
+- [ ] Re-enable `referenceWindow.enable`.
+
+## 10. Visual Verification
+
+- [ ] Compare the main side bar layout with `media/Common/window.png`.
+- [ ] Compare the ready status bar state with `media/Common/status.png`.
+- [ ] Compare the status quick pick with `media/Common/status_list.png`.
+- [ ] Test Light, Dark, and High Contrast themes.
+- [ ] Verify long symbol names do not overlap toolbar controls or filters.
+
+## 11. Developer Verification
+
+Use PowerShell:
+
+```powershell
+npm run check-types
+npm run lint
+npm run compile
+```
+
+Optional:
+
+```powershell
+npm test
+```
+
+Known note: `npm test` may be affected by VS Code test runner environment issues. Typecheck, lint, and compile are the required baseline.
