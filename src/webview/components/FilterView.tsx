@@ -62,13 +62,6 @@ const FilterView: React.FC<FilterViewProps> = ({ initialSelection, onApply, onCa
                     <span className="codicon codicon-close close-btn" onClick={onCancel}></span>
                 </div>
                 
-                <div className="filter-actions-top">
-                    <span className="filter-description">Check to show</span>
-                    <VSCodeButton appearance="icon" onClick={toggleAll} title="Toggle All">
-                        <span className="codicon codicon-check-all"></span>
-                    </VSCodeButton>
-                </div>
-
                 <div className="filter-list">
                     {Object.entries(symbolKindNames).map(([key, name]) => {
                         const kind = Number(key);
@@ -98,6 +91,9 @@ const FilterView: React.FC<FilterViewProps> = ({ initialSelection, onApply, onCa
                 </div>
 
                 <div className="filter-footer">
+                    <VSCodeButton appearance="icon" onClick={toggleAll} title="Toggle All" style={{ marginRight: 'auto' }}>
+                        <span className="codicon codicon-check-all"></span>
+                    </VSCodeButton>
                     <VSCodeButton appearance="secondary" onClick={onCancel}>Cancel</VSCodeButton>
                     <VSCodeButton appearance="primary" onClick={() => onApply(selection)}>OK</VSCodeButton>
                 </div>
