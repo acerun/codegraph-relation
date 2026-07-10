@@ -130,11 +130,11 @@ codegraph init
 | Setting | Default | Description |
 | --- | --- | --- |
 | `shared.codeGraphPath` | `codegraph` | CodeGraph CLI command name or full path. |
-| `shared.enableRipgrepFallback` | `false` | Enables optional text-search fallback. |
+| `shared.enableRipgrepFallback` | `true` | Enables optional text-search fallback. |
 | `shared.autoSyncOnSave` | `true` | Runs debounced `codegraph sync` after file changes when `.codegraph/` already exists and a CodeGraph Relation side-bar view is visible. |
 | `shared.autoSyncDebounceMs` | `30000` | Delay before automatic sync runs after file changes (250–3,600,000 ms). |
 | `symbolWindow.enable` | `true` | Enables Symbol Window. |
-| `symbolWindow.splitView` | `false` | Splits Current Document and Project Symbols into separate views. |
+| `symbolWindow.splitView` | `true` | Splits Current Document and Project Symbols into separate views. |
 | `symbolWindow.enableHighlighting` | `true` | Highlights query terms in symbol results. |
 | `symbolWindow.symbolParsing.mode` | `auto` | Controls symbol display cleanup. |
 | `relationWindow.enable` | `true` | Enables Relation Window. |
@@ -147,12 +147,7 @@ codegraph init
 
 | Command | Keybinding | Purpose |
 | --- | --- | --- |
-| `Symbol Window: Focus Project Window Search` | `Ctrl+T` | Search workspace symbols. |
-| `Symbol Window: Focus Current Window Search` | `Ctrl+Shift+O` | Filter current-file symbols. |
-| `Relation Window: Search` | `Shift+Alt+H` | Load relations for the current symbol. |
-| `Relation Window: Lookup References` | `Shift+Alt+F12` | Open references for the current symbol. |
-| `Reference Window: Previous Reference` | `F1` | Move to previous reference result. |
-| `Reference Window: Next Reference` | `F2` | Move to next reference result. |
+| `Relation Window: Search` | `Ctrl+Alt+S` | Run relation search for the current symbol. |
 
 ## Troubleshooting
 

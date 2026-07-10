@@ -36,9 +36,10 @@ interface CodeGraphFile {
 }
 
 export class CodeGraphService {
-    private static readonly DEFAULT_LIMIT = 200;
+    private static readonly DEFAULT_LIMIT = 500;
     private static readonly DEFAULT_PROJECT_SYMBOL_LIMIT = 20;
     private static readonly output = vscode.window.createOutputChannel('CodeGraph Relation');
+    private readonly documentSymbolsCache = new Map<string, { mtimeMs: number; value: Promise<SymbolItem[]> }>();
 
     constructor(private readonly fallbackRoot: string) {
         this.log(`Activated. fallbackRoot=${fallbackRoot}`);
@@ -76,6 +77,7 @@ export class CodeGraphService {
         onProgress?: (percent: number) => void
     ): Promise<void> {
         await this.execCodeGraphStreaming([command], this.workspaceRoot, onProgress);
+        this.documentSymbolsCache.clear();
     }
 
     public async searchSymbols(query: string, limit = CodeGraphService.DEFAULT_LIMIT): Promise<SymbolItem[]> {
@@ -104,23 +106,26 @@ export class CodeGraphService {
         const hasMainFile = CodeGraphService.hasMainFile(indexedFiles);
         const items: SymbolItem[] = [];
 
-        for (const file of indexedFiles) {
-            const relativePath = file.path!;
-            try {
-                const symbolsOutput = await this.execCodeGraph([
-                    'node',
-                    '-p',
-                    root,
-                    '-f',
-                    relativePath,
-                    relativePath,
-                    '--symbols-only'
-                ], root);
-                items.push(...CodeGraphService.parseFileSymbols(symbolsOutput, root, relativePath));
-            } catch (error) {
-                this.log(`getProjectSymbols skipped file ${relativePath}: ${error instanceof Error ? error.message : String(error)}`);
-            }
-
+        for (let offset = 0; offset < indexedFiles.length; offset += 4) {
+            const batch = await Promise.all(indexedFiles.slice(offset, offset + 4).map(async file => {
+                const relativePath = file.path!;
+                try {
+                    const symbolsOutput = await this.execCodeGraph([
+                        'node',
+                        '-p',
+                        root,
+                        '-f',
+                        relativePath,
+                        relativePath,
+                        '--symbols-only'
+                    ], root);
+                    return CodeGraphService.parseFileSymbols(symbolsOutput, root, relativePath);
+                } catch (error) {
+                    this.log(`getProjectSymbols skipped file ${relativePath}: ${error instanceof Error ? error.message : String(error)}`);
+                    return [];
+                }
+            }));
+            items.push(...batch.flat());
             if (items.length >= symbolLimit && !hasMainFile) {
                 break;
             }
@@ -148,7 +153,14 @@ export class CodeGraphService {
         }
 
         const relativePath = this.toRelativePath(uri.fsPath, root);
-        const output = await this.execCodeGraph([
+        const cacheKey = `${root}:${relativePath}`;
+        const mtimeMs = fs.existsSync(uri.fsPath) ? fs.statSync(uri.fsPath).mtimeMs : 0;
+        const cached = this.documentSymbolsCache.get(cacheKey);
+        if (cached?.mtimeMs === mtimeMs) {
+            return cached.value;
+        }
+
+        const value = this.execCodeGraph([
             'node',
             '-p',
             root,
@@ -156,11 +168,21 @@ export class CodeGraphService {
             relativePath,
             relativePath,
             '--symbols-only'
-        ], root);
+        ], root).then(output => {
+            const items = CodeGraphService.parseFileSymbols(output, root, relativePath);
+            this.log(`getDocumentSymbols ${relativePath} -> ${items.length} items`);
+            return items;
+        });
+        this.documentSymbolsCache.set(cacheKey, { mtimeMs, value });
 
-        const items = CodeGraphService.parseFileSymbols(output, root, relativePath);
-        this.log(`getDocumentSymbols ${relativePath} -> ${items.length} items`);
-        return items;
+        try {
+            return await value;
+        } catch (error) {
+            if (this.documentSymbolsCache.get(cacheKey)?.value === value) {
+                this.documentSymbolsCache.delete(cacheKey);
+            }
+            throw error;
+        }
     }
 
     public async findSymbolAtLocation(uri: vscode.Uri, position: vscode.Position): Promise<vscode.CallHierarchyItem | undefined> {

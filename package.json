@@ -2,7 +2,7 @@
   "name": "codegraph-relation",
   "displayName": "CodeGraph Relation",
   "description": "CodeGraph-based symbol navigation, relation exploration, and reference lookup.",
-  "version": "1.1.2",
+  "version": "1.1.4",
   "publisher": "runm",
   "license": "MIT",
   "author": {
@@ -177,33 +177,8 @@
     ],
     "keybindings": [
       {
-        "command": "reference-window.next",
-        "key": "f2",
-        "when": "reference-window.hasResults && referenceWindow.exists"
-      },
-      {
-        "command": "reference-window.prev",
-        "key": "f1",
-        "when": "reference-window.hasResults && referenceWindow.exists"
-      },
-      {
-        "command": "symbol-window.focusProjectSearch",
-        "key": "ctrl+t",
-        "when": "config.symbolWindow.enable"
-      },
-      {
-        "command": "symbol-window.focusCurrentSearch",
-        "key": "ctrl+shift+o",
-        "when": "config.symbolWindow.enable"
-      },
-      {
-        "command": "relation-window.lookupReference",
-        "key": "shift+alt+f12",
-        "when": "config.referenceWindow.enable"
-      },
-      {
         "command": "relation-window.manualSearch",
-        "key": "shift+alt+h",
+        "key": "ctrl+alt+s",
         "when": "config.relationWindow.enable"
       }
     ],
@@ -305,7 +280,7 @@
         "properties": {
           "shared.enableRipgrepFallback": {
             "type": "boolean",
-            "default": false,
+            "default": true,
             "description": "Enable ripgrep text-search fallback. Disabled by default because CodeGraph is the primary index."
           },
           "shared.codeGraphPath": {
@@ -348,7 +323,7 @@
           },
           "symbolWindow.splitView": {
             "type": "boolean",
-            "default": false,
+            "default": true,
             "description": "Split the Symbol Window into two separate views: 'Current Document' (Primary Side Bar) and 'Project Symbols' (Secondary Side Bar)."
           },
           "symbolWindow.enableHighlighting": {
@@ -423,5 +398,8 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "uuid": "^13.0.0"
+  },
+  "allowScripts": {
+    "@vscode/ripgrep@1.17.0": true
   }
 }

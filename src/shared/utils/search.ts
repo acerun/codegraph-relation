@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as cp from 'child_process';
@@ -13,6 +14,28 @@ export interface DeepSearchOptions {
     disabledByDefault?: boolean;
 }
 
+function isRipgrepAvailable(): boolean {
+    try {
+        if (!fs.existsSync(rgPath)) {
+            console.warn(`[Deep Search] Ripgrep binary not found: ${rgPath}`);
+            return false;
+        }
+        const stat = fs.statSync(rgPath);
+        if (!stat.isFile()) {
+            console.warn(`[Deep Search] Ripgrep path is not a file: ${rgPath}`);
+            return false;
+        }
+        // Ripgrep binary should be at least 4MB; reject obviously truncated downloads
+        if (stat.size < 4 * 1024 * 1024) {
+            console.warn(`[Deep Search] Ripgrep binary appears truncated: ${rgPath} (${stat.size} bytes)`);
+            return false;
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 export async function performDeepSearch(options: DeepSearchOptions): Promise<vscode.Location[]> {
     const { query, cwd, isCaseSensitive = false, isWordMatch = false, includePattern, excludePattern, disabledByDefault = false } = options;
 
@@ -25,6 +48,10 @@ export async function performDeepSearch(options: DeepSearchOptions): Promise<vsc
         if (!enabled) {
             return [];
         }
+    }
+
+    if (!isRipgrepAvailable()) {
+        return [];
     }
 
     const args = [

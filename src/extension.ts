@@ -15,18 +15,40 @@ import * as fs from 'fs';
 import { rgPath } from '@vscode/ripgrep';
 
 function ensureRipgrepPermissions() {
-    if (process.platform !== 'win32') {
-        try {
-            // Check if file exists first
-            if (fs.existsSync(rgPath)) {
-                fs.chmodSync(rgPath, 0o755);
-                console.log(`[Source Window] Fixed permissions for: ${rgPath}`);
-            } else {
-                console.warn(`[Source Window] Ripgrep binary not found at: ${rgPath}`);
-            }
-        } catch (error) {
-            console.error(`[Source Window] Failed to set permissions for ripgrep: ${error}`);
+    try {
+        if (!fs.existsSync(rgPath)) {
+            console.warn(`[Source Window] Ripgrep binary not found at: ${rgPath}`);
+            return;
         }
+
+        const stat = fs.statSync(rgPath);
+        if (!stat.isFile()) {
+            console.warn(`[Source Window] Ripgrep path is not a file: ${rgPath}`);
+            return;
+        }
+
+        // Validate the binary is not truncated/corrupted (ripgrep binary should be > 4MB)
+        if (stat.size < 4 * 1024 * 1024) {
+            console.warn(`[Source Window] Ripgrep binary appears truncated: ${rgPath} (${stat.size} bytes)`);
+        }
+
+        if (process.platform !== 'win32') {
+            fs.chmodSync(rgPath, 0o755);
+            console.log(`[Source Window] Fixed permissions for: ${rgPath}`);
+        } else {
+            // On Windows, remove Zone.Identifier ADS (Mark of the Web) added by browser downloads
+            try {
+                const zoneIdPath = `${rgPath}:Zone.Identifier`;
+                if (fs.existsSync(zoneIdPath)) {
+                    fs.unlinkSync(zoneIdPath);
+                    console.log(`[Source Window] Removed Zone.Identifier from: ${rgPath}`);
+                }
+            } catch {
+                // Zone.Identifier removal is best-effort; not critical if it fails
+            }
+        }
+    } catch (error) {
+        console.error(`[Source Window] Failed to validate ripgrep: ${error}`);
     }
 }
 
@@ -419,14 +441,19 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.commands.registerCommand('relation-window.lookupReference', async () => {
-            const editor = vscode.window.activeTextEditor;
-            if (editor) {
-                const uri = editor.document.uri;
-                const position = editor.selection.active;
-                const wordRange = editor.document.getWordRangeAtPosition(position);
-                const word = wordRange ? editor.document.getText(wordRange) : 'Selection';
-                
-                await referenceController?.lookupReference(uri, position, word);
+            try {
+                const editor = vscode.window.activeTextEditor;
+                if (editor) {
+                    const uri = editor.document.uri;
+                    const position = editor.selection.active;
+                    const wordRange = editor.document.getWordRangeAtPosition(position);
+                    const word = wordRange ? editor.document.getText(wordRange) : 'Selection';
+                    
+                    await referenceController?.lookupReference(uri, position, word);
+                }
+            } catch (error) {
+                console.error('[CodeGraph Relation] lookupReference failed:', error);
+                vscode.window.showErrorMessage(`Lookup Reference failed: ${error instanceof Error ? error.message : String(error)}`);
             }
         })
     );

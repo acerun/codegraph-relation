@@ -44,7 +44,6 @@ export class RelationController {
     private cancellationTokenSource: vscode.CancellationTokenSource | undefined;
     // Map to track cancellation tokens for individual node expansions
     private nodeExpansionTokens: Map<string, vscode.CancellationTokenSource> = new Map();
-    private readonly maxPrefetchChildren = 40;
 
     // Pagination for References
     private cachedReferences: vscode.Location[] = [];
@@ -798,10 +797,9 @@ export class RelationController {
                 return;
             }
 
-            // Cancel any existing expansion for this node
+            // Reuse the in-flight expansion instead of starting another CLI process.
             if (this.nodeExpansionTokens.has(itemId)) {
-                this.nodeExpansionTokens.get(itemId)?.cancel();
-                this.nodeExpansionTokens.get(itemId)?.dispose();
+                return;
             }
 
             const cts = new vscode.CancellationTokenSource();
@@ -841,8 +839,6 @@ export class RelationController {
                             applyPrefetchedChildren(cachedRelationItem, children);
                         }
                         this.registerRelationItems(children);
-                        // Render the expanded node now; grandchildren are prefetched in
-                        // the background after both fetch tasks settle (see below).
                         this.webviewProvider.postMessage({
                             command: 'updateNode',
                             itemId: itemId,
@@ -863,10 +859,6 @@ export class RelationController {
                 });
 
                 await Promise.allSettled([codeGraphTask, deepSearchTask]);
-
-                // Background: warm the grandchildren cache so the next expand is instant.
-                // Not awaited — the expanded level is already on screen.
-                void this.prefetchChildren(Array.from(childrenMap.values()), direction, token);
             } finally {
                 this.webviewProvider.postMessage({ command: 'setLoading', isLoading: false });
 
@@ -943,8 +935,6 @@ export class RelationController {
             if (changed) {
                 const children = Array.from(childrenMap.values());
                 this.registerRelationItems(children);
-                // Render the children immediately; prefetch of grandchildren happens
-                // in the background after the final result is assembled (see below).
                 onUpdate(children);
             }
         };
@@ -972,9 +962,6 @@ export class RelationController {
 
         const children = Array.from(childrenMap.values());
         this.registerRelationItems(children);
-        // Background: warm the grandchildren cache so the next expand is instant.
-        // Not awaited — the current level is already on screen.
-        void this.prefetchChildren(children, direction, token);
         return children;
     }
 
@@ -1072,38 +1059,6 @@ export class RelationController {
             if (result.size === nameSet.size) { break; }
         }
         return result;
-    }
-
-    private async prefetchChildren(
-        items: RelationItem[],
-        direction: 'incoming' | 'outgoing',
-        token?: vscode.CancellationToken
-    ) {
-        const itemsToPrefetch = items
-            .filter(item => !item.isCategory && !item.isLoadMore && !item.isRef && !item.children)
-            .slice(0, this.maxPrefetchChildren);
-
-        for (const item of itemsToPrefetch) {
-            if (token?.isCancellationRequested) {
-                return;
-            }
-
-            const cachedItem = this.itemCache.get(item.id);
-            if (!cachedItem) {
-                continue;
-            }
-
-            try {
-                const children = await this.fetchChildrenCodeGraph(cachedItem, direction, token);
-                if (token?.isCancellationRequested) {
-                    return;
-                }
-                applyPrefetchedChildren(item, children);
-                this.registerRelationItems(children);
-            } catch (error) {
-                console.error('[Source Window] Failed to prefetch relation children', error);
-            }
-        }
     }
 
     private findCachedRelationItem(itemId: string): RelationItem | undefined {

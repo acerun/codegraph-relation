@@ -248,7 +248,8 @@ export class SymbolController {
             if (this.debounceTimer) { clearTimeout(this.debounceTimer); }
             
             const searchId = ++this.currentSearchId;
-            const debounceTime = 300;
+            const cacheKey = query.trim();
+            const debounceTime = this.searchCache.has(cacheKey) ? 0 : 300;
 
             this.debounceTimer = setTimeout(async () => {
                 if (searchId !== this.currentSearchId) { return; }
@@ -264,9 +265,19 @@ export class SymbolController {
                 let allSymbols: SymbolItem[] = [];
 
                 try {
-                    allSymbols = keywords.length === 0
-                        ? await this.model.getProjectSymbols()
-                        : await this.model.getWorkspaceSymbols(query);
+                    const cachedSymbols = this.searchCache.get(cacheKey);
+                    if (cachedSymbols) {
+                        allSymbols = [...cachedSymbols];
+                    } else {
+                        const fetchedSymbols = keywords.length === 0
+                            ? await this.model.getProjectSymbols()
+                            : await this.model.getWorkspaceSymbols(query);
+                        if (searchId !== this.currentSearchId || token.isCancellationRequested) {
+                            return;
+                        }
+                        this.searchCache.set(cacheKey, fetchedSymbols);
+                        allSymbols = [...fetchedSymbols];
+                    }
                     if (searchId !== this.currentSearchId || token.isCancellationRequested) {
                         return;
                     }

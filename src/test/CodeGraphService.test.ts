@@ -6,6 +6,73 @@ import { RelationItem } from '../shared/common/types.js';
 import { applyPrefetchedChildren, shouldPublishResolvedChildren } from '../features/relation/relationCache.js';
 
 suite('CodeGraphService Test Suite', () => {
+    test('requests enough query results for project symbol filtering', async () => {
+        const service = new CodeGraphService('C:/repo');
+        let args: string[] = [];
+        (service as any).findProjectRoot = () => 'C:/repo';
+        (service as any).execCodeGraph = async (nextArgs: string[]) => {
+            args = nextArgs;
+            return '[]';
+        };
+
+        await service.searchSymbols('needle');
+
+        assert.strictEqual(args.at(-1), '500');
+    });
+
+    test('loads the default project files concurrently', async () => {
+        const service = new CodeGraphService('C:/repo');
+        let activeCalls = 0;
+        let maxActiveCalls = 0;
+        let release!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        const files = Array.from({ length: 4 }, (_, index) => ({
+            path: `src/${index}.ts`,
+            nodeCount: 5
+        }));
+
+        (service as any).findProjectRoot = () => 'C:/repo';
+        (service as any).execCodeGraph = async (args: string[]) => {
+            if (args[0] === 'files') {
+                return JSON.stringify(files);
+            }
+
+            activeCalls++;
+            maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
+            await gate;
+            activeCalls--;
+            return Array.from({ length: 5 }, (_, index) =>
+                `- \`symbol${index}\` (function) - :${index + 1}`
+            ).join('\n');
+        };
+
+        const symbolsPromise = service.getProjectSymbols(20);
+        await new Promise(resolve => setImmediate(resolve));
+        release();
+        const symbols = await symbolsPromise;
+
+        assert.strictEqual(maxActiveCalls, 4);
+        assert.strictEqual(symbols.length, 20);
+    });
+
+    test('reuses document symbols while the file is unchanged', async () => {
+        const service = new CodeGraphService('C:/repo');
+        let calls = 0;
+        (service as any).findProjectRoot = () => 'C:/repo';
+        (service as any).isInsideWorkspace = () => true;
+        (service as any).toRelativePath = () => 'src/sample.ts';
+        (service as any).execCodeGraph = async () => {
+            calls++;
+            return '- `sample` (function) - :1';
+        };
+        const uri = vscode.Uri.file('C:/repo/src/sample.ts');
+
+        await service.getDocumentSymbols(uri);
+        await service.getDocumentSymbols(uri);
+
+        assert.strictEqual(calls, 1);
+    });
+
     test('maps query JSON nodes to symbol items', () => {
         const items = CodeGraphService.mapQueryResults([
             {
