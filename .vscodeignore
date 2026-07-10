@@ -1,5 +1,6 @@
 .vscode/**
 .vscode-test/**
+.codegraph/**
 out/**
 node_modules/**
 !node_modules/@vscode/ripgrep/**
@@ -14,4 +15,8 @@ vsc-extension-quickstart.md
 **/*.ts
 **/.vscode-test.*
 reference/**
+!node_modules/@colbymchenry/codegraph/package.json
+!node_modules/@colbymchenry/codegraph/npm-sdk.js
+!node_modules/@colbymchenry/codegraph-*/package.json
+!node_modules/@colbymchenry/codegraph-*/lib/**
 

@@ -41,7 +41,7 @@ async function main() {
 		sourcesContent: false,
 		platform: 'node',
 		outfile: 'dist/extension.js',
-		external: ['vscode', '@vscode/ripgrep'],
+		external: ['vscode', '@vscode/ripgrep', '@colbymchenry/codegraph'],
 		logLevel: 'silent',
 		plugins: [
 			esbuildProblemMatcherPlugin,

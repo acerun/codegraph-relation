@@ -34,12 +34,12 @@ export class RelationModel {
     }
 
     public async getIncomingCalls(item: vscode.CallHierarchyItem): Promise<vscode.CallHierarchyIncomingCall[]> {
-        const callers = await this.codeGraph.getRelationItems(item.name, 'incoming');
+        const callers = await this.codeGraph.getRelationItems(item, 'incoming');
         return callers.map(caller => new vscode.CallHierarchyIncomingCall(caller, [caller.selectionRange]));
     }
 
     public async getOutgoingCalls(item: vscode.CallHierarchyItem): Promise<vscode.CallHierarchyOutgoingCall[]> {
-        const callees = await this.codeGraph.getRelationItems(item.name, 'outgoing');
+        const callees = await this.codeGraph.getRelationItems(item, 'outgoing');
         return callees.map(callee => new vscode.CallHierarchyOutgoingCall(callee, [callee.selectionRange]));
     }
 
