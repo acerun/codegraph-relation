@@ -6,6 +6,33 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-07-11
+
+### Changed
+- 为了兼容各平台，将 CodeGraph SDK 调用方式恢复为全 `codegraph cli` 方式，确保在更多环境中稳定运行。
+- 优化 Relation Window 预查询子级层加载，使展开操作更流畅。
+- Project Window 和 Relation Window 文件路径从右对齐改为从左直接显示，便于长路径阅读。
+- 修改 Relation Window 中符号的缩进，提升层次感。
+
+### Fixed
+- 优化 Relation Window 显示，没有下一级时不再显示 `>` 箭头，减少视觉干扰。
+- 反选图标移至 OK 按钮一行，界面布局更紧凑。
+
+## [1.1.3] - 2026-07-10
+
+### Changed
+- 优化搜索快捷键和搜索速度，提升日常使用体验。
+- 使用 CodeGraph SDK 代替 CodeGraph CLI 调用方式，提高查询效率。
+
+## [1.1.2] - 2026-06-28
+
+### Added
+- **实调用点导航（Real Call-site Navigation）**：在 Relation Window 中查看 Callers/Callees 时，直接跳转到具体的调用位置而非仅跳转到符号定义。
+- **模糊符号搜索（Fuzzy Symbol Search）**：Project Symbols 搜索支持更智能的模糊匹配。
+
+### Changed
+- 进一步优化 CodeGraph 查询集成的稳定性。
+
 ## [1.1.1] - 2026-06-28
 
 ### Changed
