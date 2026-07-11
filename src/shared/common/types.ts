@@ -79,6 +79,7 @@ export interface RelationItem {
     selectionRange: any;
     children?: RelationItem[];
     hasChildren?: boolean; // To show expander before fetching
+    hasChildrenKnown?: boolean; // Availability was probed without loading the child list
     isRef?: boolean; // Is a reference (leaf node)
     isLoadMore?: boolean;
     isDeepSearch?: boolean;
@@ -99,6 +100,7 @@ export interface HistoryEntry {
 export type RelationMessage = 
     | { command: 'updateRelation'; root: RelationItem; children: RelationItem[]; direction: 'incoming' | 'outgoing'; history: HistoryEntry[]; historyIndex: number; isLocked: boolean; requestId?: number; showBothDirections?: boolean; autoExpandBothDirections?: boolean }
     | { command: 'updateNode'; itemId: string; children: RelationItem[] }
+    | { command: 'updateNodeAvailability'; itemId: string; hasChildren: boolean }
     | { command: 'setLoading'; isLoading: boolean }
     | { command: 'error'; message: string }
     | { command: 'setDirection'; direction: 'incoming' | 'outgoing' }

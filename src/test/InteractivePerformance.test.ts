@@ -4,6 +4,9 @@ import { SymbolController } from '../features/symbol/SymbolController.js';
 import { RelationController } from '../features/relation/RelationController.js';
 import { CodeGraphService } from '../shared/services/CodeGraphService.js';
 import { RelationWebviewProvider } from '../features/relation/RelationWebviewProvider.js';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import RelationItemView from '../webview/features/relation/RelationItemView.js';
 
 suite('Interactive Performance Test Suite', () => {
     test('reuses completed project symbol searches', async () => {
@@ -61,40 +64,151 @@ suite('Interactive Performance Test Suite', () => {
 
         assert.strictEqual(incomingCalls, 1);
         assert.strictEqual(updatedChildren.length, 1);
-        assert.strictEqual(updatedChildren[0].hasChildren, false);
+        assert.strictEqual(updatedChildren[0].hasChildren, true);
         assert.strictEqual(updatedChildren[0].children, undefined);
 
         await waitFor(() => incomingCalls === 2);
         releasePrefetch();
-        await waitFor(() => updatedChildren[0].children !== undefined);
+        await waitFor(() => updatedChildren[0].hasChildrenKnown === true);
 
         assert.strictEqual(updatedChildren[0].hasChildren, false);
-        assert.deepStrictEqual(updatedChildren[0].children, []);
+        assert.strictEqual(updatedChildren[0].children, undefined);
         assert.ok(messages.some(message =>
-            message.command === 'updateNode' &&
+            message.command === 'updateNodeAvailability' &&
             message.itemId === updatedChildren[0].id &&
-            message.children.length === 0
+            message.hasChildren === false
         ));
         tokenSource.dispose();
         controller.dispose();
     });
 
-    test('prefetches the next level after expanding cached relation children', async () => {
+    test('resumes interrupted relation availability probes', async () => {
         const { controller, model, root, child, tokenSource } = createRelationHarness();
-        const grandchild = new vscode.CallHierarchyItem(
-            vscode.SymbolKind.Function,
-            'grandchild',
-            '',
-            vscode.Uri.file('C:/repo/grandchild.ts'),
-            child.range,
-            child.selectionRange
+        model.getIncomingCalls = async (item: vscode.CallHierarchyItem) => item.name === root.name
+            ? [new vscode.CallHierarchyIncomingCall(child, [child.selectionRange])]
+            : [];
+        let probeCalls = 0;
+        let firstProbeStarted = false;
+        let releaseFirstProbe!: () => void;
+        const firstProbeGate = new Promise<void>(resolve => { releaseFirstProbe = resolve; });
+        model.hasCalls = async () => {
+            probeCalls++;
+            if (probeCalls === 1) {
+                firstProbeStarted = true;
+                await firstProbeGate;
+            }
+            return false;
+        };
+
+        let rootChildren: any[] = [];
+        await (controller as any).fetchInitialChildren(
+            root,
+            'incoming',
+            tokenSource.token,
+            (children: any[]) => { rootChildren = children; }
         );
+        await waitFor(() => firstProbeStarted);
+        tokenSource.cancel();
+
+        assert.strictEqual(rootChildren[0].children, undefined);
+        assert.strictEqual(rootChildren[0].hasChildren, true);
+        assert.strictEqual(rootChildren[0].hasChildrenKnown, undefined);
+
+        const resumeTokenSource = new vscode.CancellationTokenSource();
+        try {
+            (controller as any).resumePendingPrefetch(resumeTokenSource.token);
+            await waitFor(() => rootChildren[0].hasChildrenKnown === true, 200);
+
+            assert.strictEqual(rootChildren[0].hasChildren, false);
+            assert.strictEqual(probeCalls, 2);
+        } finally {
+            releaseFirstProbe();
+            resumeTokenSource.dispose();
+            tokenSource.dispose();
+            controller.dispose();
+        }
+    });
+
+    test('suppresses auto search while preview navigation is in progress', async () => {
+        const { controller, root } = createRelationHarness();
+
+        await (controller as any).handleMessage({
+            command: 'preview',
+            uri: root.uri.toString(),
+            range: root.range
+        });
+
+        assert.strictEqual((controller as any).isJumping, true);
+        clearTimeout((controller as any).jumpTimeout);
+        controller.dispose();
+    });
+
+    test('yields to interaction before probing every relation child', async () => {
+        const { controller, model, root, tokenSource } = createRelationHarness();
+        const children = Array.from({ length: 24 }, (_, index) => new vscode.CallHierarchyItem(
+            vscode.SymbolKind.Function,
+            `child${index}`,
+            '',
+            vscode.Uri.file(`C:/repo/child${index}.ts`),
+            root.range,
+            root.selectionRange
+        ));
+        let probeCalls = 0;
+        let releaseProbes!: () => void;
+        const probeGate = new Promise<void>(resolve => { releaseProbes = resolve; });
         model.getIncomingCalls = async (item: vscode.CallHierarchyItem) => {
             if (item.name === root.name) {
-                return [new vscode.CallHierarchyIncomingCall(child, [child.selectionRange])];
+                return children.map(child => new vscode.CallHierarchyIncomingCall(child, [child.selectionRange]));
             }
-            if (item.name === child.name) {
-                return [new vscode.CallHierarchyIncomingCall(grandchild, [grandchild.selectionRange])];
+            probeCalls++;
+            await probeGate;
+            return [];
+        };
+
+        await (controller as any).fetchInitialChildren(
+            root,
+            'incoming',
+            tokenSource.token,
+            () => undefined
+        );
+        await delay(0);
+
+        assert.ok(probeCalls <= 1, `started ${probeCalls} probes before yielding`);
+        tokenSource.cancel();
+        releaseProbes();
+        tokenSource.dispose();
+        controller.dispose();
+    });
+
+    test('does not let a slow relation probe block sibling availability', async () => {
+        const { controller, model, root, tokenSource } = createRelationHarness();
+        const slowChild = new vscode.CallHierarchyItem(
+            vscode.SymbolKind.Function,
+            'aSlowChild',
+            '',
+            vscode.Uri.file('C:/repo/aSlowChild.ts'),
+            root.range,
+            root.selectionRange
+        );
+        const fastLeaf = new vscode.CallHierarchyItem(
+            vscode.SymbolKind.Function,
+            'bFastLeaf',
+            '',
+            vscode.Uri.file('C:/repo/bFastLeaf.ts'),
+            root.range,
+            root.selectionRange
+        );
+        let slowProbeStarted = false;
+        let releaseSlowProbe!: () => void;
+        const slowProbeGate = new Promise<void>(resolve => { releaseSlowProbe = resolve; });
+        model.getIncomingCalls = async (item: vscode.CallHierarchyItem) => {
+            if (item.name === root.name) {
+                return [slowChild, fastLeaf].map(child =>
+                    new vscode.CallHierarchyIncomingCall(child, [child.selectionRange]));
+            }
+            if (item.name === slowChild.name) {
+                slowProbeStarted = true;
+                await slowProbeGate;
             }
             return [];
         };
@@ -106,20 +220,187 @@ suite('Interactive Performance Test Suite', () => {
             tokenSource.token,
             (children: any[]) => { rootChildren = children; }
         );
-        await waitFor(() => rootChildren[0]?.children !== undefined);
+
+        try {
+            await waitFor(() => slowProbeStarted);
+            await waitFor(() => rootChildren.find(item => item.name === fastLeaf.name)?.hasChildrenKnown === true, 200);
+            assert.strictEqual(rootChildren.find(item => item.name === fastLeaf.name)?.hasChildren, false);
+        } finally {
+            tokenSource.cancel();
+            releaseSlowProbe();
+            tokenSource.dispose();
+            controller.dispose();
+        }
+    });
+
+    test('uses lightweight availability when full child loads are slow', async () => {
+        const { controller, model, root, tokenSource } = createRelationHarness();
+        const children = ['aSlowChild', 'bSlowChild', 'cFastLeaf'].map(name =>
+            new vscode.CallHierarchyItem(
+                vscode.SymbolKind.Function,
+                name,
+                '',
+                vscode.Uri.file(`C:/repo/${name}.ts`),
+                root.range,
+                root.selectionRange
+            ));
+        const slowChildren = new Set(children.slice(0, 2).map(child => child.name));
+        let fullChildLoads = 0;
+        let releaseSlowProbes!: () => void;
+        const slowProbeGate = new Promise<void>(resolve => { releaseSlowProbes = resolve; });
+        model.getIncomingCalls = async (item: vscode.CallHierarchyItem) => {
+            if (item.name === root.name) {
+                return children.map(child => new vscode.CallHierarchyIncomingCall(child, [child.selectionRange]));
+            }
+            if (slowChildren.has(item.name)) {
+                fullChildLoads++;
+                await slowProbeGate;
+            }
+            return [];
+        };
+        model.hasCalls = async (item: vscode.CallHierarchyItem) => item.name !== 'cFastLeaf';
+
+        let rootChildren: any[] = [];
+        await (controller as any).fetchInitialChildren(
+            root,
+            'incoming',
+            tokenSource.token,
+            (items: any[]) => { rootChildren = items; }
+        );
+
+        try {
+            await waitFor(() => rootChildren.every(item => item.hasChildrenKnown === true), 200);
+            assert.strictEqual(rootChildren.find(item => item.name === 'cFastLeaf')?.hasChildren, false);
+            assert.strictEqual(fullChildLoads, 0);
+        } finally {
+            tokenSource.cancel();
+            releaseSlowProbes();
+            tokenSource.dispose();
+            controller.dispose();
+        }
+    });
+
+    test('shows a chevron only when relation children are confirmed', () => {
+        const range = new vscode.Range(0, 0, 0, 4);
+        const item = {
+            id: 'unknown',
+            name: 'main',
+            detail: '',
+            kind: vscode.SymbolKind.Function,
+            uri: vscode.Uri.file('C:/repo/main.ts').toString(),
+            range,
+            selectionRange: range,
+            hasChildren: true
+        };
+        const props = {
+            item,
+            direction: 'incoming',
+            selectedId: null,
+            onSelect: () => undefined,
+            onExpand: () => undefined,
+            onJump: () => undefined
+        } as const;
+
+        const collapsedMarkup = renderToStaticMarkup(React.createElement(RelationItemView, props));
+        const expandedMarkup = renderToStaticMarkup(React.createElement(RelationItemView, { ...props, expanded: true }));
+        const expandedKnownMarkup = renderToStaticMarkup(React.createElement(RelationItemView, {
+            ...props,
+            expanded: true,
+            item: { ...item, hasChildrenKnown: true }
+        }));
+        const branchMarkup = renderToStaticMarkup(React.createElement(RelationItemView, {
+            ...props,
+            item: { ...item, children: [{ ...item, id: 'child', hasChildren: false }] }
+        }));
+        const leafMarkup = renderToStaticMarkup(React.createElement(RelationItemView, {
+            ...props,
+            item: { ...item, hasChildren: false, children: [] }
+        }));
+
+        assert.match(collapsedMarkup, /codicon-ellipsis/);
+        assert.doesNotMatch(collapsedMarkup, /codicon-chevron-right/);
+        assert.doesNotMatch(collapsedMarkup, /codicon-loading/);
+        assert.match(expandedMarkup, /codicon-loading/);
+        assert.doesNotMatch(expandedMarkup, /codicon-chevron-right/);
+        assert.match(expandedKnownMarkup, /codicon-loading/);
+        assert.doesNotMatch(expandedKnownMarkup, /codicon-chevron-right/);
+        assert.match(branchMarkup, /codicon-chevron-right/);
+        assert.doesNotMatch(branchMarkup, /codicon-ellipsis|codicon-loading/);
+        assert.match(leafMarkup, /expand-icon[^\"]*hidden/);
+        assert.doesNotMatch(leafMarkup, /codicon-loading/);
+    });
+
+    test('probes the next level after expanding relation children', async () => {
+        const { controller, model, root, child, tokenSource } = createRelationHarness();
+        const grandchild = new vscode.CallHierarchyItem(
+            vscode.SymbolKind.Function,
+            'grandchild',
+            '',
+            vscode.Uri.file('C:/repo/grandchild.ts'),
+            child.range,
+            child.selectionRange
+        );
+        const greatGrandchild = new vscode.CallHierarchyItem(
+            vscode.SymbolKind.Function,
+            'greatGrandchild',
+            '',
+            vscode.Uri.file('C:/repo/greatGrandchild.ts'),
+            grandchild.range,
+            grandchild.selectionRange
+        );
+        const nextGeneration = new vscode.CallHierarchyItem(
+            vscode.SymbolKind.Function,
+            'nextGeneration',
+            '',
+            vscode.Uri.file('C:/repo/nextGeneration.ts'),
+            greatGrandchild.range,
+            greatGrandchild.selectionRange
+        );
+        model.getIncomingCalls = async (item: vscode.CallHierarchyItem) => {
+            if (item.name === root.name) {
+                return [new vscode.CallHierarchyIncomingCall(child, [child.selectionRange])];
+            }
+            if (item.name === child.name) {
+                return [new vscode.CallHierarchyIncomingCall(grandchild, [grandchild.selectionRange])];
+            }
+            if (item.name === grandchild.name) {
+                return [new vscode.CallHierarchyIncomingCall(greatGrandchild, [greatGrandchild.selectionRange])];
+            }
+            if (item.name === greatGrandchild.name) {
+                return [new vscode.CallHierarchyIncomingCall(nextGeneration, [nextGeneration.selectionRange])];
+            }
+            return [];
+        };
+
+        let rootChildren: any[] = [];
+        await (controller as any).fetchInitialChildren(
+            root,
+            'incoming',
+            tokenSource.token,
+            (children: any[]) => { rootChildren = children; }
+        );
+        await waitFor(() => rootChildren[0]?.hasChildrenKnown === true);
 
         const childRelation = rootChildren[0];
         assert.strictEqual(childRelation.hasChildren, true);
-        assert.strictEqual(childRelation.children.length, 1);
-        const grandchildRelation = childRelation.children[0];
-        assert.strictEqual(grandchildRelation.children, undefined);
+        assert.strictEqual(childRelation.children, undefined);
 
         (controller as any).cancellationTokenSource = tokenSource;
         await (controller as any).resolveHierarchy(childRelation.id, 'incoming');
-        await waitFor(() => grandchildRelation.children !== undefined);
+        assert.strictEqual(childRelation.children.length, 1);
+        const grandchildRelation = childRelation.children[0];
+        await waitFor(() => grandchildRelation.hasChildrenKnown === true);
 
-        assert.strictEqual(grandchildRelation.hasChildren, false);
-        assert.deepStrictEqual(grandchildRelation.children, []);
+        assert.strictEqual(grandchildRelation.hasChildren, true);
+        assert.strictEqual(grandchildRelation.children, undefined);
+
+        await (controller as any).resolveHierarchy(grandchildRelation.id, 'incoming');
+        assert.strictEqual(grandchildRelation.children.length, 1);
+        const greatGrandchildRelation = grandchildRelation.children[0];
+        await waitFor(() => greatGrandchildRelation.hasChildrenKnown === true);
+
+        assert.strictEqual(greatGrandchildRelation.hasChildren, true);
+        assert.strictEqual(greatGrandchildRelation.children, undefined);
         controller.dispose();
     });
 
@@ -184,6 +465,21 @@ function createRelationHarness() {
         getOutgoingCalls: async () => [],
         getDeepIncomingCalls: async () => [],
         getDeepOutgoingCalls: async () => []
+    };
+    model.hasCalls = async (
+        item: vscode.CallHierarchyItem,
+        direction: 'incoming' | 'outgoing',
+        kinds: number[]
+    ) => {
+        const calls = direction === 'incoming'
+            ? await model.getIncomingCalls(item)
+            : await model.getOutgoingCalls(item);
+        return calls.some((call: vscode.CallHierarchyIncomingCall | vscode.CallHierarchyOutgoingCall) => {
+            const kind = direction === 'incoming'
+                ? (call as vscode.CallHierarchyIncomingCall).from.kind
+                : (call as vscode.CallHierarchyOutgoingCall).to.kind;
+            return kinds.length === 0 || kinds.includes(kind);
+        });
     };
     (controller as any).model = model;
 

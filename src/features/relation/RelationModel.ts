@@ -43,6 +43,15 @@ export class RelationModel {
         return callees.map(callee => new vscode.CallHierarchyOutgoingCall(callee, [callee.selectionRange]));
     }
 
+    public async hasCalls(
+        item: vscode.CallHierarchyItem,
+        direction: 'incoming' | 'outgoing',
+        kinds: number[]
+    ): Promise<boolean> {
+        const relations = await this.codeGraph.getRelationItems(item, direction);
+        return relations.some(relation => kinds.length === 0 || kinds.includes(relation.kind));
+    }
+
     public async getDefinition(uri: vscode.Uri, position: vscode.Position): Promise<vscode.Location | undefined> {
         return this.codeGraph.getDefinition(uri, position);
     }

@@ -76,6 +76,9 @@ const RelationApp: React.FC = () => {
                         setChildren(prev => updateNodeChildren(prev, message.itemId, message.children));
                     }
                     break;
+                case 'updateNodeAvailability':
+                    setChildren(prev => updateNodeAvailability(prev, message.itemId, message.hasChildren));
+                    break;
                 case 'setDirection':
                     setDirection(message.direction);
                     break;
@@ -151,10 +154,24 @@ const RelationApp: React.FC = () => {
     const updateNodeChildren = (items: RelationItem[], targetId: string, newChildren: RelationItem[]): RelationItem[] => {
         return items.map(item => {
             if (item.id === targetId) {
-                return { ...item, children: newChildren, hasChildren: newChildren.length > 0 };
+                return { ...item, children: newChildren, hasChildren: newChildren.length > 0, hasChildrenKnown: true };
             }
             if (item.children) {
                 return { ...item, children: updateNodeChildren(item.children, targetId, newChildren) };
+            }
+            return item;
+        });
+    };
+
+    const updateNodeAvailability = (items: RelationItem[], targetId: string, hasChildren: boolean): RelationItem[] => {
+        return items.map(item => {
+            if (item.id === targetId) {
+                return item.children === undefined
+                    ? { ...item, hasChildren, hasChildrenKnown: true }
+                    : item;
+            }
+            if (item.children) {
+                return { ...item, children: updateNodeAvailability(item.children, targetId, hasChildren) };
             }
             return item;
         });
@@ -171,6 +188,13 @@ const RelationApp: React.FC = () => {
             }
         }
         return null;
+    };
+
+    const selectItem = (item: RelationItem) => {
+        setSelectedId(item.id);
+        if (item.uri && item.range) {
+            vscode.postMessage({ command: 'preview', uri: item.uri, range: item.range });
+        }
     };
 
     const handleKeyNavigation = (e: React.KeyboardEvent) => {
@@ -192,7 +216,7 @@ const RelationApp: React.FC = () => {
             if (root.id === selectedId) {
                 // Root selected
                 if (e.key === 'ArrowDown' && children.length > 0) {
-                    setSelectedId(children[0].id);
+                    selectItem(children[0]);
                 }
                 return;
             }
@@ -213,18 +237,18 @@ const RelationApp: React.FC = () => {
             if (index !== -1) {
                 if (e.key === 'ArrowDown') {
                     if (index < siblings.length - 1) {
-                        setSelectedId(siblings[index + 1].id);
+                        selectItem(siblings[index + 1]);
                     }
                 } else if (e.key === 'ArrowUp') {
                     if (index > 0) {
-                        setSelectedId(siblings[index - 1].id);
+                        selectItem(siblings[index - 1]);
                     } else {
                         // Select parent if at top
                         const parent = findParent(children, selectedId);
                         if (parent) {
-                            setSelectedId(parent.id);
+                            selectItem(parent);
                         } else {
-                            setSelectedId(root.id);
+                            selectItem(root);
                         }
                     }
                 }
@@ -258,37 +282,6 @@ const RelationApp: React.FC = () => {
              }
         }
     };
-
-    useEffect(() => {
-        // Sync selection to controller for commands
-        if (selectedId) {
-            vscode.postMessage({ command: 'setSelected', itemId: selectedId });
-
-            // Find item to send preview
-            const findItem = (items: RelationItem[], id: string): RelationItem | undefined => {
-                if (root && root.id === id) return root;
-                for (const item of items) {
-                    if (item.id === id) return item;
-                    if (item.children) {
-                        const found = findItem(item.children, id);
-                        if (found) return found;
-                    }
-                }
-                return undefined;
-            };
-            
-            const item = findItem(children, selectedId);
-            if (item && item.uri && item.range) {
-                vscode.postMessage({ 
-                    command: 'preview', 
-                    uri: item.uri, 
-                    range: item.range 
-                });
-            }
-        } else {
-            vscode.postMessage({ command: 'setSelected', itemId: null });
-        }
-    }, [selectedId, root, children]);
 
     return (
         <div className="relation-app" tabIndex={0} onKeyDown={handleKeyNavigation}>
@@ -384,7 +377,7 @@ const RelationApp: React.FC = () => {
                         direction={direction}
                         selectedId={selectedId}
                         autoExpandBothDirections={autoExpandBothDirections}
-                        onSelect={(item) => setSelectedId(item.id)}
+                        onSelect={selectItem}
                         onExpand={(item: RelationItem, dir: 'incoming' | 'outgoing') => vscode.postMessage({ command: 'resolveHierarchy', itemId: item.id, direction: dir })}
                         onJump={(item: RelationItem, isDouble: boolean | undefined) => {
                             if (item.isLoadMore) {

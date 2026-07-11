@@ -79,6 +79,11 @@ const RelationItemView: React.FC<RelationItemViewProps> = ({ item, direction, is
     const iconInfo = getIconInfo();
 
     const isSelected = selectedId === item.id;
+    const hasUnknownChildren = item.hasChildren && item.children === undefined && !item.hasChildrenKnown;
+    const isCheckingChildren = expanded && item.hasChildren && item.children === undefined;
+    const expandIcon = isCheckingChildren
+        ? 'codicon-loading codicon-modifier-spin'
+        : hasUnknownChildren ? 'codicon-ellipsis' : 'codicon-chevron-right';
 
     useEffect(() => {
         if (isSelected && itemRef.current) {
@@ -109,7 +114,7 @@ const RelationItemView: React.FC<RelationItemViewProps> = ({ item, direction, is
                 data-vscode-context={contextValue}
             >
                 <span 
-                    className={`codicon codicon-chevron-right expand-icon ${expanded ? 'expanded' : ''} ${!item.hasChildren ? 'hidden' : ''}`}
+                    className={`codicon ${expandIcon} expand-icon ${expanded && !isCheckingChildren ? 'expanded' : ''} ${!item.hasChildren ? 'hidden' : ''}`}
                     onClick={handleExpand}
                 />
                 {item.isDeepSearch && (

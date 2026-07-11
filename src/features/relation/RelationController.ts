@@ -44,7 +44,7 @@ export class RelationController {
     private cancellationTokenSource: vscode.CancellationTokenSource | undefined;
     // Map to track cancellation tokens for individual node expansions
     private nodeExpansionTokens: Map<string, vscode.CancellationTokenSource> = new Map();
-    private prefetchingNodes = new Set<string>();
+    private prefetchingNodes = new Map<string, vscode.CancellationToken>();
 
     // Pagination for References
     private cachedReferences: vscode.Location[] = [];
@@ -148,6 +148,7 @@ export class RelationController {
                 break;
             case 'preview':
                 if (message.uri && message.range) {
+                    this.markNavigationInProgress();
                     previewLocation(message.uri, message.range);
                 }
                 break;
@@ -251,9 +252,6 @@ export class RelationController {
                     }
                 }
                 break;
-            case 'preview':
-                await this.handleJump(message.uri, message.range, true);
-                break;
             case 'loadMoreRelation':
                 this.loadMoreReferences();
                 break;
@@ -317,15 +315,18 @@ export class RelationController {
         await this.handleJump(item.targetUri, rangeToUse, false);
     }
 
-    private async handleJump(uriStr: string, range: any, preserveFocus: boolean) {
-        // Set jump flag to suppress next auto-sync
+    private markNavigationInProgress() {
         this.isJumping = true;
         if (this.jumpTimeout) {
             clearTimeout(this.jumpTimeout);
         }
         this.jumpTimeout = setTimeout(() => {
             this.isJumping = false;
-        }, 1000); // 1s safety timeout
+        }, 1000);
+    }
+
+    private async handleJump(uriStr: string, range: any, preserveFocus: boolean) {
+        this.markNavigationInProgress();
 
         if (uriStr && range) {
             const uri = vscode.Uri.parse(uriStr);
@@ -597,6 +598,7 @@ export class RelationController {
                 if (rootItem) {
                     // Stability Check
                     if (!isManual && this.isSameRoot(rootItem)) {
+                        this.resumePendingPrefetch(token);
                         this.webviewProvider.postMessage({ command: 'setLoading', isLoading: false });
                         return;
                     }
@@ -799,7 +801,7 @@ export class RelationController {
             }
 
             // Reuse the in-flight expansion instead of starting another CLI process.
-            if (this.nodeExpansionTokens.has(itemId) || this.prefetchingNodes.has(itemId)) {
+            if (this.nodeExpansionTokens.has(itemId)) {
                 return;
             }
 
@@ -998,38 +1000,84 @@ export class RelationController {
         setTimeout(() => void this.prefetchChildren(children, direction, token), 0);
     }
 
+    private resumePendingPrefetch(token: vscode.CancellationToken) {
+        const pending: Record<'incoming' | 'outgoing', RelationItem[]> = {
+            incoming: [],
+            outgoing: []
+        };
+        for (const item of this.relationItemCache.values()) {
+            if (item.hasChildren && !item.hasChildrenKnown && item.children === undefined && this.itemCache.has(item.id)) {
+                pending[item.direction ?? this.direction].push(item);
+            }
+        }
+        for (const direction of ['incoming', 'outgoing'] as const) {
+            if (pending[direction].length > 0) {
+                this.schedulePrefetch(pending[direction], direction, token);
+            }
+        }
+    }
+
+    private isPrefetchActive(itemId: string) {
+        const token = this.prefetchingNodes.get(itemId);
+        return token !== undefined && !token.isCancellationRequested;
+    }
+
     private async prefetchChildren(
         children: RelationItem[],
         direction: 'incoming' | 'outgoing',
         token: vscode.CancellationToken
     ): Promise<void> {
-        await Promise.all(children.map(async child => {
-            if (token.isCancellationRequested || child.children !== undefined || this.prefetchingNodes.has(child.id)) {
-                return;
-            }
-
-            const childItem = this.itemCache.get(child.id);
-            if (!childItem) {
-                return;
-            }
-
-            this.prefetchingNodes.add(child.id);
-            try {
-                const grandchildren = await this.fetchChildrenParallel(childItem, direction, token, () => undefined, true);
+        let nextIndex = 0;
+        const worker = async () => {
+            while (nextIndex < children.length) {
+                const child = children[nextIndex++];
                 if (token.isCancellationRequested) {
                     return;
                 }
+                if (child.children !== undefined || child.hasChildrenKnown || this.isPrefetchActive(child.id)) {
+                    continue;
+                }
 
-                applyPrefetchedChildren(child, grandchildren);
-                this.webviewProvider.postMessage({
-                    command: 'updateNode',
-                    itemId: child.id,
-                    children: grandchildren
-                });
-            } finally {
-                this.prefetchingNodes.delete(child.id);
+                // Keep background discovery from starving selection and navigation events.
+                await new Promise(resolve => setTimeout(resolve, 0));
+                if (token.isCancellationRequested) {
+                    return;
+                }
+                if (child.children !== undefined || child.hasChildrenKnown || this.isPrefetchActive(child.id) || this.nodeExpansionTokens.has(child.id)) {
+                    continue;
+                }
+
+                const childItem = this.itemCache.get(child.id);
+                if (!childItem) {
+                    continue;
+                }
+
+                this.prefetchingNodes.set(child.id, token);
+                try {
+                    const hasChildren = await this.model.hasCalls(childItem, direction, this.getActiveFilter(direction));
+                    if (token.isCancellationRequested) {
+                        return;
+                    }
+                    if (child.children !== undefined) {
+                        continue;
+                    }
+
+                    child.hasChildren = hasChildren;
+                    child.hasChildrenKnown = true;
+                    this.webviewProvider.postMessage({
+                        command: 'updateNodeAvailability',
+                        itemId: child.id,
+                        hasChildren
+                    });
+                } finally {
+                    if (this.prefetchingNodes.get(child.id) === token) {
+                        this.prefetchingNodes.delete(child.id);
+                    }
+                }
             }
-        }));
+        };
+
+        await Promise.all(Array.from({ length: Math.min(2, children.length) }, worker));
     }
 
     private getCleanName(name: string): string {
@@ -1141,16 +1189,18 @@ export class RelationController {
         }
     }
 
+    private getActiveFilter(direction: 'incoming' | 'outgoing'): number[] {
+        if (this.context.workspaceState.get('relationWindow.showBothDirections')) {
+            return direction === 'incoming' ? this.incomingFilter : this.outgoingFilter;
+        }
+        return this.currentFilter;
+    }
+
     private async fetchChildrenCodeGraph(item: vscode.CallHierarchyItem, direction: 'incoming' | 'outgoing', token?: vscode.CancellationToken): Promise<RelationItem[]> {
         if (token?.isCancellationRequested) {return [];}
         
         const results: RelationItem[] = [];
-        
-        // Determine which filter to use
-        let activeFilter = this.currentFilter;
-        if (this.context.workspaceState.get('relationWindow.showBothDirections')) {
-            activeFilter = direction === 'incoming' ? this.incomingFilter : this.outgoingFilter;
-        }
+        const activeFilter = this.getActiveFilter(direction);
 
         // Cache file reads so we don't open the same file repeatedly (shared by both directions)
         const docCache = new Map<string, vscode.TextDocument | undefined>();
@@ -1217,7 +1267,8 @@ export class RelationController {
                             uri: call.from.uri.toString(),
                             range: callSite || range,
                             selectionRange: callSite || call.from.selectionRange,
-                            hasChildren: false
+                            hasChildren: true,
+                            direction
                         });
                     }
                 }
@@ -1302,7 +1353,8 @@ export class RelationController {
                             targetSelectionRange: call.to.selectionRange,
                             range: callSite || call.to.selectionRange,
                             selectionRange: callSite || call.to.selectionRange,
-                            hasChildren: false,
+                            hasChildren: true,
+                            direction,
                             isDeepSearch: false
                         });
                     }
@@ -1364,7 +1416,8 @@ export class RelationController {
                         uri: call.from.uri.toString(),
                         range: range,
                         selectionRange: call.from.selectionRange,
-                        hasChildren: false,
+                        hasChildren: true,
+                        direction,
                         isDeepSearch: true
                     });
                 }
@@ -1436,7 +1489,8 @@ export class RelationController {
                             targetSelectionRange: call.to.selectionRange, // Definition Selection Range
                             range: range, // Call Site Range (Regex Token Range)
                             selectionRange: range, // Call Site Selection Range
-                            hasChildren: false,
+                            hasChildren: true,
+                            direction,
                             isDeepSearch: true // Unverified
                         });
                     }
