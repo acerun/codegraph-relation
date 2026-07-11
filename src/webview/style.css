@@ -191,7 +191,7 @@ body {
 }
 
 .relation-item .detail {
-    flex: 1;
+    flex: none;
     opacity: 0.6;
     font-size: 0.85em;
     white-space: nowrap;
@@ -452,18 +452,16 @@ body {
 }
 
 .path {
-    margin-left: auto; /* Push to right */
-    padding-left: 10px;
+    margin-left: 16px;
+    padding-left: 0;
     opacity: 0.5;
     font-size: 0.85em;
     white-space: nowrap;
     flex-shrink: 0;
 }
 
-/* Relation Window: show path tight beside the symbol name (short gap) instead of flush right. */
 .relation-item .path {
-    margin-left: 6px;
-    padding-left: 0;
+    margin-left: 16px;
 }
 
 /* Reference Window Styles */
