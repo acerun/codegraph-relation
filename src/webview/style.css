@@ -199,10 +199,6 @@ body {
     text-overflow: ellipsis;
 }
 
-.relation-children {
-    padding-left: 22px;
-}
-
 .no-results {
     padding: 10px;
     text-align: center;

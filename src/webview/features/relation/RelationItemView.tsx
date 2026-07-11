@@ -112,12 +112,8 @@ const RelationItemView: React.FC<RelationItemViewProps> = ({ item, direction, is
                     className={`codicon codicon-chevron-right expand-icon ${expanded ? 'expanded' : ''} ${!item.hasChildren ? 'hidden' : ''}`}
                     onClick={handleExpand}
                 />
-                {item.isDeepSearch ? (
+                {item.isDeepSearch && (
                     <span className="codicon codicon-zap deep-search-icon" title="Deep Search Result"></span>
-                ) : (
-                    (!isRoot && !item.isCategory) && (
-                        <span className="codicon codicon-zap deep-search-icon placeholder"></span>
-                    )
                 )}
                 <span 
                     className={`codicon ${iconInfo.icon} symbol-icon`} 
