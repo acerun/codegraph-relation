@@ -8,52 +8,50 @@ import { applyPrefetchedChildren, shouldPublishResolvedChildren } from '../featu
 suite('CodeGraphService Test Suite', () => {
     test('requests enough query results for project symbol filtering', async () => {
         const service = new CodeGraphService('C:/repo');
-        let requestedLimit = 0;
+        let args: string[] = [];
         (service as any).findProjectRoot = () => 'C:/repo';
-        (service as any).execCodeGraph = () => assert.fail('search must not launch the CLI');
-        (service as any).withCodeGraph = (_root: string, operation: (graph: any) => unknown) => operation({
-            searchNodes: (_query: string, options: { limit: number }) => {
-                requestedLimit = options.limit;
-                return [];
-            }
-        });
+        (service as any).execCodeGraph = async (nextArgs: string[]) => {
+            args = nextArgs;
+            return '[]';
+        };
 
         await service.searchSymbols('needle');
 
-        assert.strictEqual(requestedLimit, 500);
+        assert.deepStrictEqual(args, ['query', 'needle', '-p', 'C:/repo', '--json', '-l', '500']);
     });
 
-    test('loads project symbols in one embedded SDK session', async () => {
+    test('loads the default project files concurrently', async () => {
         const service = new CodeGraphService('C:/repo');
-        let sessions = 0;
-        let fileQueries = 0;
+        let activeCalls = 0;
+        let maxActiveCalls = 0;
+        let release!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
         const files = Array.from({ length: 4 }, (_, index) => ({
             path: `src/${index}.ts`,
             nodeCount: 5
         }));
 
         (service as any).findProjectRoot = () => 'C:/repo';
-        (service as any).execCodeGraph = () => assert.fail('project symbols must not launch the CLI');
-        (service as any).withCodeGraph = (_root: string, operation: (graph: any) => unknown) => {
-            sessions++;
-            return operation({
-                getFiles: () => files,
-                getNodesInFile: (filePath: string) => {
-                    fileQueries++;
-                    return Array.from({ length: 5 }, (_, index) => createSdkNode(
-                        `${filePath}:${index}`,
-                        `symbol${index}`,
-                        filePath,
-                        index + 1
-                    ));
-                }
-            });
+        (service as any).execCodeGraph = async (args: string[]) => {
+            if (args[0] === 'files') {
+                return JSON.stringify(files);
+            }
+
+            activeCalls++;
+            maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
+            await gate;
+            activeCalls--;
+            return Array.from({ length: 5 }, (_, index) =>
+                `- \`symbol${index}\` (function) - :${index + 1}`
+            ).join('\n');
         };
 
-        const symbols = await service.getProjectSymbols(20);
+        const symbolsPromise = service.getProjectSymbols(20);
+        await new Promise(resolve => setImmediate(resolve));
+        release();
+        const symbols = await symbolsPromise;
 
-        assert.strictEqual(sessions, 1);
-        assert.strictEqual(fileQueries, 4);
+        assert.strictEqual(maxActiveCalls, 4);
         assert.strictEqual(symbols.length, 20);
     });
 
@@ -63,13 +61,10 @@ suite('CodeGraphService Test Suite', () => {
         (service as any).findProjectRoot = () => 'C:/repo';
         (service as any).isInsideWorkspace = () => true;
         (service as any).toRelativePath = () => 'src/sample.ts';
-        (service as any).execCodeGraph = () => assert.fail('document symbols must not launch the CLI');
-        (service as any).withCodeGraph = (_root: string, operation: (graph: any) => unknown) => operation({
-            getNodesInFile: () => {
-                calls++;
-                return [createSdkNode('sample-id', 'sample', 'src/sample.ts', 1)];
-            }
-        });
+        (service as any).execCodeGraph = async () => {
+            calls++;
+            return '- `sample` (function) - :1';
+        };
         const uri = vscode.Uri.file('C:/repo/src/sample.ts');
 
         await service.getDocumentSymbols(uri);
@@ -82,7 +77,6 @@ suite('CodeGraphService Test Suite', () => {
         const items = CodeGraphService.mapQueryResults([
             {
                 node: {
-                    id: 'handle-search-id',
                     kind: 'method',
                     name: 'handleSearch',
                     qualifiedName: 'SymbolController::handleSearch',
@@ -104,27 +98,9 @@ suite('CodeGraphService Test Suite', () => {
         assert.strictEqual(items[0].kind, vscode.SymbolKind.Method);
         assert.strictEqual(items[0].range.start.line, 300);
         assert.strictEqual(items[0].uri, vscode.Uri.file('C:/repo/src/features/symbol/SymbolController.ts').toString());
-        assert.strictEqual(items[0].codeGraphNodeId, 'handle-search-id');
     });
 
-    test('closes the embedded graph when a query fails', () => {
-        const service = new CodeGraphService('C:/repo');
-        const originalOpen = (CodeGraphService as any).openCodeGraph;
-        let closed = false;
-        (CodeGraphService as any).openCodeGraph = () => ({ close: () => { closed = true; } });
-
-        try {
-            assert.throws(
-                () => (service as any).withCodeGraph('C:/repo', () => { throw new Error('query failed'); }),
-                /query failed/
-            );
-            assert.strictEqual(closed, true);
-        } finally {
-            (CodeGraphService as any).openCodeGraph = originalOpen;
-        }
-    });
-
-    test('queries relations by CodeGraph node ID without launching the CLI', async () => {
+    test('reuses successful CLI relation queries', async () => {
         const service = new CodeGraphService('C:/repo');
         const range = new vscode.Range(0, 0, 0, 4);
         const root = new vscode.CallHierarchyItem(
@@ -135,52 +111,70 @@ suite('CodeGraphService Test Suite', () => {
             range,
             range
         );
-        (root as any).codeGraphNodeId = 'root-id';
-        let requestedId = '';
+        let calls = 0;
+        let args: string[] = [];
         (service as any).findProjectRoot = () => 'C:/repo';
-        (service as any).execCodeGraph = () => assert.fail('relations must not launch the CLI');
-        (service as any).withCodeGraph = (_root: string, operation: (graph: any) => unknown) => operation({
-            getCallers: (nodeId: string) => {
-                requestedId = nodeId;
-                return [{ node: createSdkNode('caller-id', 'caller', 'src/caller.ts', 7), edge: {} }];
-            }
-        });
+        (service as any).execCodeGraph = async (nextArgs: string[]) => {
+            calls++;
+            args = nextArgs;
+            return JSON.stringify({ callers: [{ name: 'caller', kind: 'function', filePath: 'src/caller.ts', startLine: 7 }] });
+        };
 
-        const callers = await service.getRelationItems(root, 'incoming');
+        const first = await service.getRelationItems(root, 'incoming');
+        const second = await service.getRelationItems(root, 'incoming');
 
-        assert.strictEqual(requestedId, 'root-id');
-        assert.strictEqual(callers.length, 1);
-        assert.strictEqual(callers[0].name, 'caller');
-        assert.strictEqual((callers[0] as any).codeGraphNodeId, 'caller-id');
+        assert.strictEqual(calls, 1);
+        assert.deepStrictEqual(args, ['callers', 'root', '-p', 'C:/repo', '--json', '-l', '100']);
+        assert.strictEqual(first, second);
+        assert.strictEqual(first[0].name, 'caller');
+        assert.strictEqual(first[0].range.start.line, 6);
     });
 
-    test('resolves a restored relation item by file and line', async () => {
+    test('drops cached relation queries after sync', async () => {
         const service = new CodeGraphService('C:/repo');
-        const range = new vscode.Range(9, 0, 9, 4);
-        const restored = new vscode.CallHierarchyItem(
+        const range = new vscode.Range(0, 0, 0, 4);
+        const root = new vscode.CallHierarchyItem(
             vscode.SymbolKind.Function,
-            'sameName',
+            'root',
             '',
-            vscode.Uri.file('C:/repo/src/sample.ts'),
+            vscode.Uri.file('C:/repo/root.ts'),
             range,
             range
         );
-        let requestedId = '';
+        let calls = 0;
         (service as any).findProjectRoot = () => 'C:/repo';
-        (service as any).withCodeGraph = (_root: string, operation: (graph: any) => unknown) => operation({
-            getNodesInFile: () => [
-                createSdkNode('other-id', 'sameName', 'src/sample.ts', 2),
-                createSdkNode('restored-id', 'sameName', 'src/sample.ts', 10)
-            ],
-            getCallees: (nodeId: string) => {
-                requestedId = nodeId;
-                return [];
-            }
-        });
+        (service as any).execCodeGraph = async () => {
+            calls++;
+            return JSON.stringify({ callees: [] });
+        };
+        (service as any).execCodeGraphStreaming = async () => undefined;
 
-        await service.getRelationItems(restored, 'outgoing');
+        await service.getRelationItems(root, 'outgoing');
+        await service.getRelationItems(root, 'outgoing');
+        await service.runWorkspaceCommand('sync');
+        await service.getRelationItems(root, 'outgoing');
 
-        assert.strictEqual(requestedId, 'restored-id');
+        assert.strictEqual(calls, 2);
+    });
+
+    test('parses symbols-only output from codegraph node file mode', () => {
+        const output = [
+            '**src/sample.ts** - 2 symbols',
+            '',
+            '### Symbols',
+            '- `Sample` (class) - :3',
+            '- `run` (method) (value: string): void - :8'
+        ].join('\n');
+
+        const items = CodeGraphService.parseFileSymbols(output, 'C:/repo', 'src/sample.ts');
+
+        assert.strictEqual(items.length, 2);
+        assert.strictEqual(items[0].name, 'Sample');
+        assert.strictEqual(items[0].kind, vscode.SymbolKind.Class);
+        assert.strictEqual(items[0].range.start.line, 2);
+        assert.strictEqual(items[1].name, 'run');
+        assert.strictEqual(items[1].detail, '(value: string): void');
+        assert.strictEqual(items[1].kind, vscode.SymbolKind.Method);
     });
 
     test('prefers main files for default project symbol files', () => {
@@ -259,20 +253,5 @@ function createRelationItem(name: string): RelationItem {
         range,
         selectionRange: range,
         hasChildren: true
-    };
-}
-
-function createSdkNode(id: string, name: string, filePath: string, startLine: number) {
-    return {
-        id,
-        name,
-        qualifiedName: name,
-        kind: 'function',
-        filePath,
-        language: 'typescript',
-        startLine,
-        endLine: startLine,
-        startColumn: 0,
-        endColumn: name.length
     };
 }

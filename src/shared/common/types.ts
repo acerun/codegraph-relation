@@ -11,7 +11,6 @@ export interface SymbolItem {
     isDeepSearch?: boolean;
     path?: string;
     score?: number; // CodeGraph relevance score (higher = more relevant)
-    codeGraphNodeId?: string;
 }
 
 export type SymbolMode = 'current' | 'project';

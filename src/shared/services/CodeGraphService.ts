@@ -2,12 +2,10 @@ import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import CodeGraphModule from '@colbymchenry/codegraph';
 import { SymbolItem } from '../common/types.js';
 import { performDeepSearch } from '../utils/search.js';
 
 interface CodeGraphNode {
-    id?: string;
     kind?: string;
     name?: string;
     qualifiedName?: string;
@@ -25,36 +23,25 @@ interface CodeGraphSearchResult {
     score?: number;
 }
 
+interface CodeGraphRelationNode {
+    name?: string;
+    kind?: string;
+    filePath?: string;
+    startLine?: number;
+}
+
 interface CodeGraphFile {
     path?: string;
     nodeCount?: number;
 }
 
-interface EmbeddedCodeGraph {
-    close(): void;
-    searchNodes(query: string, options?: { limit?: number }): CodeGraphSearchResult[];
-    getFiles(): CodeGraphFile[];
-    getNodesInFile(filePath: string): CodeGraphNode[];
-    getCallers(nodeId: string): Array<{ node: CodeGraphNode }>;
-    getCallees(nodeId: string): Array<{ node: CodeGraphNode }>;
-}
-
-interface CodeGraphSdkConstructor {
-    openSync(projectRoot: string): EmbeddedCodeGraph;
-}
-
-type CodeGraphCallHierarchyItem = vscode.CallHierarchyItem & { codeGraphNodeId?: string };
-
-// Native ESM sees the CommonJS re-export object, while esbuild resolves its default class.
-const CodeGraphSdk = (
-    (CodeGraphModule as unknown as { default?: CodeGraphSdkConstructor }).default || CodeGraphModule
-) as CodeGraphSdkConstructor;
-
 export class CodeGraphService {
     private static readonly DEFAULT_LIMIT = 500;
     private static readonly DEFAULT_PROJECT_SYMBOL_LIMIT = 20;
+    private static readonly MAX_RELATION_CACHE_ENTRIES = 200;
     private static readonly output = vscode.window.createOutputChannel('CodeGraph Relation');
     private readonly documentSymbolsCache = new Map<string, { mtimeMs: number; value: Promise<SymbolItem[]> }>();
+    private readonly relationItemsCache = new Map<string, Promise<vscode.CallHierarchyItem[]>>();
 
     constructor(private readonly fallbackRoot: string) {
         this.log(`Activated. fallbackRoot=${fallbackRoot}`);
@@ -93,6 +80,7 @@ export class CodeGraphService {
     ): Promise<void> {
         await this.execCodeGraphStreaming([command], this.workspaceRoot, onProgress);
         this.documentSymbolsCache.clear();
+        this.relationItemsCache.clear();
     }
 
     public async searchSymbols(query: string, limit = CodeGraphService.DEFAULT_LIMIT): Promise<SymbolItem[]> {
@@ -102,9 +90,8 @@ export class CodeGraphService {
             return [];
         }
 
-        const items = this.withCodeGraph(root, graph =>
-            CodeGraphService.mapQueryResults(graph.searchNodes(query, { limit }), root)
-        );
+        const output = await this.execCodeGraph(['query', query, '-p', root, '--json', '-l', String(limit)], root);
+        const items = CodeGraphService.mapQueryResults(JSON.parse(output) as CodeGraphSearchResult[], root);
         this.log(`searchSymbols "${query}" -> ${items.length} items`);
         return items;
     }
@@ -116,23 +103,36 @@ export class CodeGraphService {
             return [];
         }
 
-        const { files, indexedFiles, hasMainFile, items } = this.withCodeGraph(root, graph => {
-            const files = graph.getFiles();
-            const indexedFiles = CodeGraphService.selectDefaultProjectFiles(files, symbolLimit);
-            const hasMainFile = CodeGraphService.hasMainFile(indexedFiles);
-            const items: SymbolItem[] = [];
+        const output = await this.execCodeGraph(['files', '-p', root, '--json'], root);
+        const files = JSON.parse(output) as CodeGraphFile[];
+        const indexedFiles = CodeGraphService.selectDefaultProjectFiles(files, symbolLimit);
+        const hasMainFile = CodeGraphService.hasMainFile(indexedFiles);
+        const items: SymbolItem[] = [];
 
-            for (const file of indexedFiles) {
-                items.push(...graph.getNodesInFile(file.path!).map(node =>
-                    CodeGraphService.nodeToSymbolItem(node, root)
-                ));
-                if (items.length >= symbolLimit && !hasMainFile) {
-                    break;
+        for (let offset = 0; offset < indexedFiles.length; offset += 4) {
+            const batch = await Promise.all(indexedFiles.slice(offset, offset + 4).map(async file => {
+                const relativePath = file.path!;
+                try {
+                    const symbolsOutput = await this.execCodeGraph([
+                        'node',
+                        '-p',
+                        root,
+                        '-f',
+                        relativePath,
+                        relativePath,
+                        '--symbols-only'
+                    ], root);
+                    return CodeGraphService.parseFileSymbols(symbolsOutput, root, relativePath);
+                } catch (error) {
+                    this.log(`getProjectSymbols skipped file ${relativePath}: ${error instanceof Error ? error.message : String(error)}`);
+                    return [];
                 }
+            }));
+            items.push(...batch.flat());
+            if (items.length >= symbolLimit && !hasMainFile) {
+                break;
             }
-
-            return { files, indexedFiles, hasMainFile, items };
-        });
+        }
 
         this.log(`getProjectSymbols files=${indexedFiles.length}/${files.length} -> ${items.length} items`);
         return hasMainFile ? items : items.slice(0, symbolLimit);
@@ -163,10 +163,16 @@ export class CodeGraphService {
             return cached.value;
         }
 
-        const value = Promise.resolve().then(() => {
-            const items = this.withCodeGraph(root, graph =>
-                graph.getNodesInFile(relativePath).map(node => CodeGraphService.nodeToSymbolItem(node, root))
-            );
+        const value = this.execCodeGraph([
+            'node',
+            '-p',
+            root,
+            '-f',
+            relativePath,
+            relativePath,
+            '--symbols-only'
+        ], root).then(output => {
+            const items = CodeGraphService.parseFileSymbols(output, root, relativePath);
             this.log(`getDocumentSymbols ${relativePath} -> ${items.length} items`);
             return items;
         });
@@ -253,21 +259,41 @@ export class CodeGraphService {
             return [];
         }
 
-        const relations = this.withCodeGraph(root, graph => {
-            const nodeId = this.resolveNodeId(graph, item, root);
-            if (!nodeId) {
-                return [];
-            }
+        const cacheKey = `${root}\0${direction}\0${item.name}\0${limit}`;
+        const cached = this.relationItemsCache.get(cacheKey);
+        if (cached) {
+            return cached;
+        }
 
-            const nodes = direction === 'incoming' ? graph.getCallers(nodeId) : graph.getCallees(nodeId);
-            return nodes.slice(0, limit).map(({ node }) => this.nodeToCallHierarchyItem(node, root));
-        });
-        this.log(`getRelationItems ${direction} ${item.name} -> ${relations.length} items`);
-        return relations;
+        const command = direction === 'incoming' ? 'callers' : 'callees';
+        const value = this.execCodeGraph([command, item.name, '-p', root, '--json', '-l', String(limit)], root)
+            .then(output => {
+                const parsed = JSON.parse(output) as { callers?: CodeGraphRelationNode[]; callees?: CodeGraphRelationNode[] };
+                const nodes = direction === 'incoming' ? parsed.callers || [] : parsed.callees || [];
+                const relations = nodes
+                    .filter(node => node.filePath && node.name)
+                    .map(node => this.relationNodeToCallHierarchyItem(node, root));
+                this.log(`getRelationItems ${direction} ${item.name} -> ${relations.length} items`);
+                return relations;
+            });
+
+        if (this.relationItemsCache.size >= CodeGraphService.MAX_RELATION_CACHE_ENTRIES) {
+            this.relationItemsCache.delete(this.relationItemsCache.keys().next().value!);
+        }
+        this.relationItemsCache.set(cacheKey, value);
+
+        try {
+            return await value;
+        } catch (error) {
+            if (this.relationItemsCache.get(cacheKey) === value) {
+                this.relationItemsCache.delete(cacheKey);
+            }
+            throw error;
+        }
     }
 
     public symbolItemToCallHierarchyItem(item: SymbolItem): vscode.CallHierarchyItem {
-        const hierarchyItem = new vscode.CallHierarchyItem(
+        return new vscode.CallHierarchyItem(
             item.kind,
             item.name,
             item.detail || '',
@@ -275,8 +301,6 @@ export class CodeGraphService {
             item.range,
             item.selectionRange
         );
-        (hierarchyItem as CodeGraphCallHierarchyItem).codeGraphNodeId = item.codeGraphNodeId;
-        return hierarchyItem;
     }
 
     public static parseProgressPercent(output: string): number | undefined {
@@ -304,6 +328,38 @@ export class CodeGraphService {
                 ...CodeGraphService.nodeToSymbolItem(result.node!, workspaceRoot),
                 score: result.score
             }));
+    }
+
+    public static parseFileSymbols(output: string, workspaceRoot: string, filePath: string): SymbolItem[] {
+        const items: SymbolItem[] = [];
+        const symbolLine = /^-\s+`(.+?)`\s+\(([^)]+)\)(?:\s+(.+?))?\s+(?:\u2014|-)\s+:(\d+)/;
+
+        for (const line of output.split(/\r?\n/)) {
+            const match = line.match(symbolLine);
+            if (!match) {
+                continue;
+            }
+
+            const name = match[1];
+            const kind = match[2];
+            const detail = (match[3] || '').trim();
+            const lineNumber = Math.max(Number(match[4]) - 1, 0);
+            const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(workspaceRoot, filePath);
+            const range = new vscode.Range(lineNumber, 0, lineNumber, Number.MAX_SAFE_INTEGER);
+
+            items.push({
+                name,
+                detail,
+                kind: CodeGraphService.kindToVscodeKind(kind),
+                range,
+                selectionRange: range,
+                children: [],
+                uri: vscode.Uri.file(absolutePath).toString(),
+                path: CodeGraphService.formatPath(workspaceRoot, absolutePath, lineNumber)
+            });
+        }
+
+        return items;
     }
 
     public static kindToVscodeKind(kind: string | undefined): vscode.SymbolKind {
@@ -354,34 +410,23 @@ export class CodeGraphService {
             children: [],
             uri: vscode.Uri.file(absolutePath).toString(),
             path: CodeGraphService.formatPath(workspaceRoot, absolutePath, startLine),
-            containerName: node.qualifiedName,
-            codeGraphNodeId: node.id
+            containerName: node.qualifiedName
         };
     }
 
-    private nodeToCallHierarchyItem(node: CodeGraphNode, root: string): vscode.CallHierarchyItem {
-        return this.symbolItemToCallHierarchyItem(CodeGraphService.nodeToSymbolItem(node, root));
-    }
+    private relationNodeToCallHierarchyItem(node: CodeGraphRelationNode, root: string): vscode.CallHierarchyItem {
+        const absolutePath = path.isAbsolute(node.filePath!) ? node.filePath! : path.join(root, node.filePath!);
+        const startLine = Math.max((node.startLine || 1) - 1, 0);
+        const range = new vscode.Range(startLine, 0, startLine, Number.MAX_SAFE_INTEGER);
 
-    private resolveNodeId(graph: EmbeddedCodeGraph, item: vscode.CallHierarchyItem, root: string): string | undefined {
-        const attachedId = (item as CodeGraphCallHierarchyItem).codeGraphNodeId;
-        if (attachedId) {
-            return attachedId;
-        }
-
-        if (item.uri.scheme !== 'file' || !this.isInsideWorkspace(item.uri.fsPath, root)) {
-            return undefined;
-        }
-
-        const relativePath = this.toRelativePath(item.uri.fsPath, root);
-        const line = item.selectionRange.start.line + 1;
-        const candidates = graph.getNodesInFile(relativePath).filter(node => node.name === item.name);
-        const containing = candidates.find(node =>
-            (node.startLine || 1) <= line && (node.endLine || node.startLine || 1) >= line
+        return new vscode.CallHierarchyItem(
+            CodeGraphService.kindToVscodeKind(node.kind),
+            node.name!,
+            '',
+            vscode.Uri.file(absolutePath),
+            range,
+            range
         );
-        return (containing || candidates.sort((a, b) =>
-            Math.abs((a.startLine || 1) - line) - Math.abs((b.startLine || 1) - line)
-        )[0])?.id;
     }
 
     private static formatPath(workspaceRoot: string, absolutePath: string, line: number): string {
@@ -461,19 +506,6 @@ export class CodeGraphService {
         const line = `[${new Date().toISOString()}] ${message}`;
         CodeGraphService.output.appendLine(line);
         console.log(`[CodeGraph Relation] ${message}`);
-    }
-
-    private static openCodeGraph(root: string): EmbeddedCodeGraph {
-        return CodeGraphSdk.openSync(root);
-    }
-
-    private withCodeGraph<T>(root: string, operation: (graph: EmbeddedCodeGraph) => T): T {
-        const graph = CodeGraphService.openCodeGraph(root);
-        try {
-            return operation(graph);
-        } finally {
-            graph.close();
-        }
     }
 
     // On Windows shell:true is required to launch the codegraph.cmd shim, but the
