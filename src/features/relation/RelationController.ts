@@ -44,6 +44,7 @@ export class RelationController {
     private cancellationTokenSource: vscode.CancellationTokenSource | undefined;
     // Map to track cancellation tokens for individual node expansions
     private nodeExpansionTokens: Map<string, vscode.CancellationTokenSource> = new Map();
+    private prefetchingNodes = new Set<string>();
 
     // Pagination for References
     private cachedReferences: vscode.Location[] = [];
@@ -490,7 +491,7 @@ export class RelationController {
                     };
 
                     const fetchAndPopulate = async (dir: 'incoming' | 'outgoing', node: RelationItem) => {
-                        await this.fetchChildrenParallel(this.currentRoot as vscode.CallHierarchyItem, dir, token, (children) => {
+                        await this.fetchInitialChildren(this.currentRoot as vscode.CallHierarchyItem, dir, token, (children) => {
                             node.children = children;
                             node.hasChildren = children.length > 0;
                             this.updateView(relationRoot, [incomingNode, outgoingNode], requestId);
@@ -505,7 +506,7 @@ export class RelationController {
                     // Ensure view is updated with categories even if empty
                     this.updateView(relationRoot, [incomingNode, outgoingNode], requestId);
                 } else {
-                    await this.fetchChildrenParallel(this.currentRoot, this.direction, token, (children) => {
+                    await this.fetchInitialChildren(this.currentRoot, this.direction, token, (children) => {
                         this.updateView(relationRoot, children, requestId);
                     });
                 }
@@ -664,7 +665,7 @@ export class RelationController {
                         
                         // Let's define a helper
                         const fetchAndPopulate = async (dir: 'incoming' | 'outgoing', node: RelationItem) => {
-                            return this.fetchChildrenParallel(rootItem, dir, token, (children) => {
+                            return this.fetchInitialChildren(rootItem, dir, token, (children) => {
                                 node.children = children;
                                 node.hasChildren = children.length > 0;
                                 // Update view with the two category nodes
@@ -717,8 +718,6 @@ export class RelationController {
                                 detail: rootItem.detail,
                                 kind: rootItem.kind
                             });
-                            this.itemCache.clear();
-                this.relationItemCache.clear();
                             this.itemCache.set(rootId, rootItem);
                             // Also cache the category nodes? No, they are virtual.
                             // But if user expands a child of category, it works fine.
@@ -728,7 +727,7 @@ export class RelationController {
                         }
 
                     } else {
-                        await this.fetchChildrenParallel(rootItem, this.direction, token, (children) => {
+                        await this.fetchInitialChildren(rootItem, this.direction, token, (children) => {
                             if (!hasCommitted) {
                                 if (children.length > 0) {
                                     hasCommitted = true;
@@ -744,8 +743,6 @@ export class RelationController {
                                         kind: rootItem.kind
                                     });
 
-                                    this.itemCache.clear();
-                this.relationItemCache.clear();
                                     this.itemCache.set(rootId, rootItem);
                                     this.updateView(relationRoot, children, requestId);
                                 }
@@ -794,11 +791,15 @@ export class RelationController {
                     itemId: itemId,
                     children: cachedRelationItem.children
                 });
+                const token = this.cancellationTokenSource?.token;
+                if (token) {
+                    this.schedulePrefetch(cachedRelationItem.children, direction, token);
+                }
                 return;
             }
 
             // Reuse the in-flight expansion instead of starting another CLI process.
-            if (this.nodeExpansionTokens.has(itemId)) {
+            if (this.nodeExpansionTokens.has(itemId) || this.prefetchingNodes.has(itemId)) {
                 return;
             }
 
@@ -859,6 +860,14 @@ export class RelationController {
                 });
 
                 await Promise.allSettled([codeGraphTask, deepSearchTask]);
+                const children = cachedRelationItem?.children;
+                if (children) {
+                    this.schedulePrefetch(
+                        children,
+                        direction,
+                        this.cancellationTokenSource?.token ?? token
+                    );
+                }
             } finally {
                 this.webviewProvider.postMessage({ command: 'setLoading', isLoading: false });
 
@@ -963,6 +972,64 @@ export class RelationController {
         const children = Array.from(childrenMap.values());
         this.registerRelationItems(children);
         return children;
+    }
+
+    private async fetchInitialChildren(
+        item: vscode.CallHierarchyItem,
+        direction: 'incoming' | 'outgoing',
+        token: vscode.CancellationToken,
+        onUpdate: (children: RelationItem[]) => void,
+        suppressLoading: boolean = false
+    ): Promise<RelationItem[]> {
+        const children = await this.fetchChildrenParallel(item, direction, token, onUpdate, suppressLoading);
+        if (token.isCancellationRequested) {
+            return [];
+        }
+
+        this.schedulePrefetch(children, direction, token);
+        return children;
+    }
+
+    private schedulePrefetch(
+        children: RelationItem[],
+        direction: 'incoming' | 'outgoing',
+        token: vscode.CancellationToken
+    ) {
+        setTimeout(() => void this.prefetchChildren(children, direction, token), 0);
+    }
+
+    private async prefetchChildren(
+        children: RelationItem[],
+        direction: 'incoming' | 'outgoing',
+        token: vscode.CancellationToken
+    ): Promise<void> {
+        await Promise.all(children.map(async child => {
+            if (token.isCancellationRequested || child.children !== undefined || this.prefetchingNodes.has(child.id)) {
+                return;
+            }
+
+            const childItem = this.itemCache.get(child.id);
+            if (!childItem) {
+                return;
+            }
+
+            this.prefetchingNodes.add(child.id);
+            try {
+                const grandchildren = await this.fetchChildrenParallel(childItem, direction, token, () => undefined, true);
+                if (token.isCancellationRequested) {
+                    return;
+                }
+
+                applyPrefetchedChildren(child, grandchildren);
+                this.webviewProvider.postMessage({
+                    command: 'updateNode',
+                    itemId: child.id,
+                    children: grandchildren
+                });
+            } finally {
+                this.prefetchingNodes.delete(child.id);
+            }
+        }));
     }
 
     private getCleanName(name: string): string {
@@ -1150,7 +1217,7 @@ export class RelationController {
                             uri: call.from.uri.toString(),
                             range: callSite || range,
                             selectionRange: callSite || call.from.selectionRange,
-                            hasChildren: true
+                            hasChildren: false
                         });
                     }
                 }
@@ -1235,7 +1302,7 @@ export class RelationController {
                             targetSelectionRange: call.to.selectionRange,
                             range: callSite || call.to.selectionRange,
                             selectionRange: callSite || call.to.selectionRange,
-                            hasChildren: true,
+                            hasChildren: false,
                             isDeepSearch: false
                         });
                     }
@@ -1297,7 +1364,7 @@ export class RelationController {
                         uri: call.from.uri.toString(),
                         range: range,
                         selectionRange: call.from.selectionRange,
-                        hasChildren: true,
+                        hasChildren: false,
                         isDeepSearch: true
                     });
                 }
@@ -1369,7 +1436,7 @@ export class RelationController {
                             targetSelectionRange: call.to.selectionRange, // Definition Selection Range
                             range: range, // Call Site Range (Regex Token Range)
                             selectionRange: range, // Call Site Selection Range
-                            hasChildren: true,
+                            hasChildren: false,
                             isDeepSearch: true // Unverified
                         });
                     }
@@ -1546,7 +1613,7 @@ export class RelationController {
                 const token = this.cancellationTokenSource.token;
                 
                 this.webviewProvider.postMessage({ command: 'setLoading', isLoading: true });
-                await this.fetchChildrenParallel(entry.root, this.direction, token, (children) => {
+                await this.fetchInitialChildren(entry.root, this.direction, token, (children) => {
                     this.updateView(relationRoot, children, requestId);
                 });
             }
